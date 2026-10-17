@@ -194,7 +194,8 @@ pub fn create_attestation_bundle(
                 details: Some(format_bundle_audit_detail(env, &bundle_id)),
             },
         );
-
+        // Keep this attestation and its subject-side indexes live until expiration.
+        Storage::extend_attestation_ttl_for_expiry(env, attestation);
         // Emit individual attestation_created event (for backward compatibility)
         crate::events::Events::attestation_created(env, &attestation);
     }
@@ -202,6 +203,14 @@ pub fn create_attestation_bundle(
     // Batch write issuer index
     Storage::add_issuer_attestations_bulk(env, &issuer, &new_issuer_ids);
     crate::storage::ChunkedIndex::add_issuer_bulk(env, &issuer, &new_issuer_ids);
+
+    // The issuer chunks above were written after the per-attestation extensions,
+    // so extend them now to cover the full expiration window.
+    if let Some(first_id) = attestation_ids.first() {
+        if let Ok(att) = Storage::get_attestation(env, first_id) {
+            Storage::extend_attestation_ttl_for_expiry(env, &att);
+        }
+    }
 
     // Update stats
     let bundle_size = attestation_ids.len();

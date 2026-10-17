@@ -4720,6 +4720,45 @@ fn test_ttl_refreshed_on_revocation() {
     assert_eq!(client.get_issuer_attestations(&issuer, &0, &(max + 1)).len(), max);
 }
 
+#[test]
+fn test_long_lived_attestation_survives_default_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, TrustLinkContract);
+    let client = TrustLinkContractClient::new(env, &contract_id);
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    // Short default TTL (1 day) so entries that are not expiry-extended would
+    // be archived shortly after creation.
+    client.initialize(&admin, &Some(1u32));
+    client.register_issuer(&admin, &issuer);
+
+    let claim = String::from_str(&env, "KYC_PASSED");
+    // One-year expiration: the expiry-aware extension must keep the record and
+    // its indexes live well past the 1-day default TTL.
+    let expiration = env.ledger().timestamp() + 365 * crate::constants::SECS_PER_DAY;
+    let id = client.create_attestation(
+        &issuer,
+        &subject,
+        &claim,
+        &Some(expiration),
+        &None,
+        &None,
+    );
+
+    // Advance the ledger past the default TTL window.
+    advance_ledger(&env, 2 * crate::constants::DAY_IN_LEDGERS);
+
+    // The attestation record must still be readable.
+    assert!(client.get_attestation(&id).is_ok(), "attestation must not be archived");
+    // The subject index must still list it (pages stay full unless end of index).
+    let page = client.get_subject_attestations(&subject, &0, &10);
+    assert_eq!(page.len(), 1, "subject index must still contain the attestation");
+    assert_eq!(page.get(0).expect("sole id"), id);
+}
+
 // ── Pause: all write operations blocked ──────────────────────────────────────
 
 #[cfg(test)]
@@ -7251,6 +7290,84 @@ mod gdpr_deletion_tests {
         let other = Address::generate(&env);
         let result = client.try_request_deletion(&other, &id);
         assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn get_subject_attestations_returns_full_pages_skipping_deleted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, issuer, subject, client) = setup(&env);
+
+        let claim = String::from_str(&env, "KYC_PASSED");
+        let id0 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id1 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id2 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id3 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id4 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id5 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id6 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        // Deleted the 2nd and 5th entries so an un-fixed implementation would
+        // return short pages and cause clients to stop paginating early.
+        client.request_deletion(&subject, &id1);
+        client.request_deletion(&subject, &id4);
+
+        // Underlying index: [id0, ~id1, id2, id3, ~id4, id5, id6]
+        // Filtered (non-deleted):                     [id0, id2, id3, id5, id6]
+        // Page 0, limit 3 -> id0, id2, id3 (full page despite deletions).
+        let page1 = client.get_subject_attestations(&subject, &0, &3);
+        assert_eq!(page1.len(), 3, "first page must be full despite mid-index deletions");
+        assert_eq!(page1.get(0).expect("id0"), id0);
+        assert_eq!(page1.get(1).expect("id2"), id2);
+        assert_eq!(page1.get(2).expect("id3"), id3);
+
+        // Page 3, limit 3 -> id5, id6 (short page: end of filtered index).
+        let page2 = client.get_subject_attestations(&subject, &3, &3);
+        assert_eq!(page2.len(), 2, "last page returns only the remaining items");
+        assert_eq!(page2.get(0).expect("id5"), id5);
+        assert_eq!(page2.get(1).expect("id6"), id6);
+
+        // Page 5, limit 3 -> empty because end of filtered index was reached.
+        let page3 = client.get_subject_attestations(&subject, &5, &3);
+        assert_eq!(page3.len(), 0, "past end returns empty page");
+    }
+
+    #[test]
+    fn get_issuer_attestations_returns_full_pages_skipping_deleted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, issuer, subject, client) = setup(&env);
+
+        let claim = String::from_str(&env, "KYC_PASSED");
+        let id0 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id1 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id2 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id3 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id4 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id5 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        let id6 = client.create_attestation(&issuer, &subject, &claim, &None, &None, &None);
+        // Delete the 2nd and 5th entries so an un-fixed implementation would
+        // return short pages and cause clients to stop paginating early.
+        client.request_deletion(&subject, &id1);
+        client.request_deletion(&subject, &id4);
+
+        // Underlying index: [id0, ~id1, id2, id3, ~id4, id5, id6]
+        // Filtered (non-deleted):                     [id0, id2, id3, id5, id6]
+        // Page 0, limit 3 -> id0, id2, id3 (full page despite deletions).
+        let page1 = client.get_issuer_attestations(&issuer, &0, &3);
+        assert_eq!(page1.len(), 3, "first page must be full despite mid-index deletions");
+        assert_eq!(page1.get(0).expect("id0"), id0);
+        assert_eq!(page1.get(1).expect("id2"), id2);
+        assert_eq!(page1.get(2).expect("id3"), id3);
+
+        // Page 3, limit 3 -> id5, id6 (short page: end of filtered index).
+        let page2 = client.get_issuer_attestations(&issuer, &3, &3);
+        assert_eq!(page2.len(), 2, "last page returns only the remaining items");
+        assert_eq!(page2.get(0).expect("id5"), id5);
+        assert_eq!(page2.get(1).expect("id6"), id6);
+
+        // Page 5, limit 3 -> empty because end of filtered index was reached.
+        let page3 = client.get_issuer_attestations(&issuer, &5, &3);
+        assert_eq!(page3.len(), 0, "past end returns empty page");
     }
 }
 

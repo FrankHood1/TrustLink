@@ -48,6 +48,8 @@ pub fn propose_attestation(
                 bundle_id: None,
             };
             store_attestation(env, &attestation);
+            // Keep the attestation and its indexes live until expiration.
+            Storage::extend_attestation_ttl_for_expiry(env, &attestation);
             Events::attestation_created(env, &attestation);
             return Ok(attestation_id);
         }
@@ -135,6 +137,8 @@ pub fn cosign_attestation(env: &Env, issuer: Address, proposal_id: String) -> Re
         };
 
         store_attestation(env, &attestation);
+        // Keep the attestation and its indexes live until expiration.
+        Storage::extend_attestation_ttl_for_expiry(env, &attestation);
         Events::attestation_created(env, &attestation);
         Events::multisig_activated(env, &proposal_id, &attestation_id);
     } else {
