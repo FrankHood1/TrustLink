@@ -322,10 +322,10 @@ impl Storage {
             return Err(Error::NotFound);
         }
 
+        let key = StorageKey::IssuerMetadata(issuer.clone());
         let mut metadata = Self::get_issuer_metadata(env, issuer)?;
         metadata.tier = tier;
 
-        let key = StorageKey::IssuerMetadata(issuer.clone());
         env.storage().persistent().set(&key, &metadata);
         env.storage().persistent().extend_ttl(&key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
 

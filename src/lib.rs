@@ -41,13 +41,14 @@ use events::Events;
 /// trusted issuers, issuers create and revoke attestations, and any caller can
 /// verify claims against the registry.
 use crate::types::{
-    AdminCouncil, AttestationRequest, AttestationStatus, AttestationTemplate,
-    AttestationVersionSnapshot, AuditAction, AuditEntry, ClaimTypeInfo, CouncilOperation, CouncilProposal,
-    ContractConfig, ContractMetadata, DecayConfig, Delegation, DisputeRecord, Endorsement, Error,
-    ExpirationHook, FeeConfig, GlobalStats, HealthStatus, IssuerMetadata, IssuerStats, IssuerTier,
-    MultiSigProposal, PendingAdminTransfer, RateLimitConfig, RequestStatus, RevocationList,
-    RevocationListFormat, StorageLimits,
-    TtlConfig, ATTESTATION_REQUEST_TTL_SECS, MULTISIG_PROPOSAL_TTL_SECS, SECS_PER_DAY,
+    AdminCouncil, AttestationBundle, AttestationRequest, AttestationStatus,
+    AttestationTemplate, AttestationVersionSnapshot, AuditEntry, ClaimTypeConstraints,
+    ContractConfig, ContractMetadata, CouncilOperation, CouncilProposal,
+    DecayConfig, Delegation, DisputeRecord, Endorsement, Error, ExpirationHook, FeeConfig,
+    GlobalStats, HealthStatus, IssuerMetadata, IssuerStats, IssuerTier, MultiSigProposal,
+    PendingAdminTransfer, RateLimitConfig, RequestStatus, RevocationList, RevocationListFormat,
+    StorageLimits, TtlConfig,
+    ATTESTATION_REQUEST_TTL_SECS, MULTISIG_PROPOSAL_TTL_SECS, SECS_PER_DAY,
 };
 
 #[contract]
@@ -118,25 +119,9 @@ impl TrustLinkContract {
         admin::get_issuer_list(&env, start, limit)
     }
 
-    /// Set the tier level for an issuer.
-    ///
-    /// Only the current admin may call this function. This updates the issuer's
-    /// tier and emits an `iss_tier` event for indexer consumption.
-    ///
-    /// # Parameters
-    /// - `admin` — current administrator address (must authorize).
-    /// - `issuer` — issuer address whose tier is being updated.
-    /// - `tier` — new [`IssuerTier`] level.
-    ///
-    /// # Errors
-    /// - [`Error::NotInitialized`] — contract has not been initialized.
-    /// - [`Error::Unauthorized`] — `admin` is not the registered administrator.
-    /// - [`Error::NotFound`] — `issuer` is not registered.
-    ///
-    /// # Examples
-    /// ```ignore
-    /// client.set_issuer_tier(&admin, &issuer_address, &IssuerTier::Premium);
-    /// ```
+    pub fn set_issuer_tier(env: Env, admin: Address, issuer: Address, tier: IssuerTier) -> Result<(), Error> {
+        admin::set_issuer_tier(&env, admin, issuer, tier)
+    }
 
     /// Create a new attestation about a subject address.
     ///

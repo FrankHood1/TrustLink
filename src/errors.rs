@@ -92,8 +92,10 @@ pub enum Error {
     VersionMismatch = 47,
     /// Feature not yet implemented.
     NotImplemented = 48,
+    /// Invalid configuration value (e.g., min > max for constraints).
+    InvalidConfigValue = 49,
     /// Description exceeds maximum length of 256 bytes.
-    DescriptionTooLong = 49,
+    DescriptionTooLong = 50,
     /// Claim type is deprecated and cannot be used for new attestations.
-    ClaimTypeDeprecated = 50,
+    ClaimTypeDeprecated = 51,
 }
