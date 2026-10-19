@@ -72,7 +72,7 @@ pub fn fulfill_request(
     }
 
     match request.status {
-        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled => return Err(Error::RequestAlreadyProcessed),
+        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled | RequestStatus::Expired => return Err(Error::RequestAlreadyProcessed),
         RequestStatus::Pending => {}
     }
 
@@ -146,7 +146,9 @@ pub fn reject_request(
     }
 
     match request.status {
-        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled => return Err(Error::RequestAlreadyProcessed),
+        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled | RequestStatus::Expired => {
+            return Err(Error::RequestAlreadyProcessed)
+        }
         RequestStatus::Pending => {}
     }
 
@@ -176,7 +178,7 @@ pub fn cancel_request(env: &Env, subject: Address, request_id: String) -> Result
     }
 
     match request.status {
-        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled => {
+        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled | RequestStatus::Expired => {
             return Err(Error::RequestAlreadyProcessed)
         }
         RequestStatus::Pending => {}
@@ -219,5 +221,24 @@ pub fn get_pending_requests(env: &Env, issuer: Address, start: u32, limit: u32) 
 }
 
 pub fn get_request(env: &Env, request_id: String) -> Result<AttestationRequest, Error> {
-    Storage::get_request(env, &request_id)
+    let mut req = Storage::get_request(env, &request_id)?;
+    // Compute expiry lazily on read: a Pending request whose deadline has
+    // passed is surfaced as Expired without requiring cleanup to have run.
+    if req.status == RequestStatus::Pending && env.ledger().timestamp() >= req.expires_at {
+        req.status = RequestStatus::Expired;
+    }
+    Ok(req)
+}
+
+/// Remove expired pending requests from an issuer's pending list, persist
+/// `RequestStatus::Expired` on each expired record, and emit a `req_exp`
+/// event per expired request.
+///
+/// # Errors
+/// - [`Error::Unauthorized`] — caller is not a registered issuer.
+pub fn cleanup_expired_requests(env: &Env, issuer: Address) -> Result<(), Error> {
+    issuer.require_auth();
+    Validation::require_issuer(env, &issuer)?;
+    Storage::cleanup_expired_requests(env, &issuer);
+    Ok(())
 }

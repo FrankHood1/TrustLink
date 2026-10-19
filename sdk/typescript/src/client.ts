@@ -852,40 +852,43 @@ export class TrustLinkClient {
   /**
    * Returns the total number of attestations for a subject.
    * @param subject - Stellar address of the subject.
-   * @returns Total count as a bigint.
+   * @returns Total count as a number (contract returns u32).
    * @throws {InvalidAddressError} If the address format is invalid.
    * @throws {NotInitializedError} If the contract has not been initialized.
    * @throws {TrustLinkError} For other contract errors.
    */
-  async getSubjectAttestationCount(subject: string): Promise<bigint> {
+  async getSubjectAttestationCount(subject: string): Promise<number> {
     validateAddress(subject);
-    return this.simulate("get_subject_attestation_count", this.addr(subject));
+    // Contract returns u32, which scValToNative decodes to a JavaScript number
+    return this.simulate<number>("get_subject_attestation_count", this.addr(subject));
   }
 
   /**
    * Returns the total number of attestations for an issuer.
    * @param issuer - Stellar address of the issuer.
-   * @returns Total count as a bigint.
+   * @returns Total count as a number (contract returns u32).
    * @throws {InvalidAddressError} If the address format is invalid.
    * @throws {NotInitializedError} If the contract has not been initialized.
    * @throws {TrustLinkError} For other contract errors.
    */
-  async getIssuerAttestationCount(issuer: string): Promise<bigint> {
+  async getIssuerAttestationCount(issuer: string): Promise<number> {
     validateAddress(issuer);
-    return this.simulate("get_issuer_attestation_count", this.addr(issuer));
+    // Contract returns u32, which scValToNative decodes to a JavaScript number
+    return this.simulate<number>("get_issuer_attestation_count", this.addr(issuer));
   }
 
   /**
    * Returns the total number of valid claims for a subject.
    * @param subject - Stellar address of the subject.
-   * @returns Total count as a bigint.
+   * @returns Total count as a number (contract returns u32).
    * @throws {InvalidAddressError} If the address format is invalid.
    * @throws {NotInitializedError} If the contract has not been initialized.
    * @throws {TrustLinkError} For other contract errors.
    */
-  async getValidClaimCount(subject: string): Promise<bigint> {
+  async getValidClaimCount(subject: string): Promise<number> {
     validateAddress(subject);
-    return this.simulate("get_valid_claim_count", this.addr(subject));
+    // Contract returns u32, which scValToNative decodes to a JavaScript number
+    return this.simulate<number>("get_valid_claim_count", this.addr(subject));
   }
 
   // ── Expiring Attestations (Issue #604) ───────────────────────────────────────

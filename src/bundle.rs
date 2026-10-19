@@ -287,3 +287,23 @@ fn format_bundle_audit_detail(env: &Env, bundle_id: &String) -> String {
     detail_bytes[PREFIX.len()..].copy_from_slice(&id_bytes);
     String::from_bytes(env, &detail_bytes)
 }
+
+/// Retrieve bundle metadata by ID.
+///
+/// # Errors
+/// - [`Error::NotFound`] — no bundle with the given ID exists.
+pub fn get_bundle(env: &Env, bundle_id: String) -> Result<AttestationBundle, Error> {
+    Storage::get_bundle(env, &bundle_id).ok_or(Error::NotFound)
+}
+
+/// Return the ordered list of bundle IDs created by `issuer`.
+#[must_use]
+pub fn get_issuer_bundles(env: &Env, issuer: Address) -> Vec<String> {
+    Storage::get_issuer_bundles(env, &issuer)
+}
+
+/// Return the ordered list of bundle IDs issued to `subject`.
+#[must_use]
+pub fn get_subject_bundles(env: &Env, subject: Address) -> Vec<String> {
+    Storage::get_subject_bundles(env, &subject)
+}

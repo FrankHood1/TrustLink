@@ -282,9 +282,10 @@ impl Storage {
         env.storage().persistent().extend_ttl(&key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
 
         // Initialize issuer metadata with Basic tier
-        let metadata = IssuerMetadata {
-            address: issuer.clone(),
-            tier: IssuerTier::Basic,
+        let metadata = crate::types::IssuerMetadata {
+            name: String::from_str(env, ""),
+            url: String::from_str(env, ""),
+            description: String::from_str(env, ""),
         };
         let metadata_key = StorageKey::IssuerMetadata(issuer.clone());
         env.storage().persistent().set(&metadata_key, &metadata);
@@ -510,6 +511,10 @@ impl Storage {
 
     pub fn get_claim_type_constraints(env: &Env, claim_type: &String) -> Option<crate::types::ClaimTypeConstraints> {
         env.storage().persistent().get(&StorageKey::ClaimTypeConstraints(claim_type.clone()))
+    }
+
+    pub fn remove_claim_type_constraints(env: &Env, claim_type: &String) {
+        env.storage().persistent().remove(&StorageKey::ClaimTypeConstraints(claim_type.clone()));
     }
 
     pub fn set_whitelist_mode(env: &Env, issuer: &Address, enabled: bool) {
@@ -884,9 +889,23 @@ impl Storage {
         let existing = Self::get_pending_request_ids(env, issuer);
         let mut updated = Vec::new(env);
         for id in existing.iter() {
-            if let Ok(req) = Self::get_request(env, &id) {
+            if let Ok(mut req) = Self::get_request(env, &id) {
                 if current_time < req.expires_at {
                     updated.push_back(id);
+                } else {
+                    // Persist the Expired status so that get_request returns
+                    // RequestStatus::Expired rather than the stale Pending value.
+                    req.status = crate::types::RequestStatus::Expired;
+                    let req_key = StorageKey::AttestationRequest(req.id.clone());
+                    env.storage().persistent().set(&req_key, &req);
+                    env.storage().persistent().extend_ttl(&req_key, ttl, ttl);
+                    crate::events::Events::request_expired(
+                        env,
+                        &req.id,
+                        issuer,
+                        &req.subject,
+                        req.expires_at,
+                    );
                 }
             }
         }

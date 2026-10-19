@@ -145,7 +145,9 @@ pub fn get_issuer_list(env: &Env, start: u32, limit: u32) -> Vec<Address> {
 pub fn add_to_whitelist(env: &Env, issuer: Address, subject: Address) -> Result<(), Error> {
     issuer.require_auth();
     Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
     Storage::add_to_whitelist(env, &issuer, &subject);
+    Events::whitelist_updated(env, &issuer, &subject, true);
     Ok(())
 }
 
@@ -153,11 +155,13 @@ pub fn bulk_add_to_whitelist(env: &Env, issuer: Address, subjects: Vec<Address>)
     const MAX_BATCH: u32 = 50;
     issuer.require_auth();
     Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
     if subjects.len() > MAX_BATCH {
         return Err(Error::LimitExceeded);
     }
     for subject in subjects.iter() {
         Storage::add_to_whitelist(env, &issuer, &subject);
+        Events::whitelist_updated(env, &issuer, &subject, true);
     }
     Ok(())
 }
@@ -165,7 +169,9 @@ pub fn bulk_add_to_whitelist(env: &Env, issuer: Address, subjects: Vec<Address>)
 pub fn remove_from_whitelist(env: &Env, issuer: Address, subject: Address) -> Result<(), Error> {
     issuer.require_auth();
     Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
     Storage::remove_from_whitelist(env, &issuer, &subject);
+    Events::whitelist_updated(env, &issuer, &subject, false);
     Ok(())
 }
 
@@ -257,10 +263,41 @@ pub fn get_issuer_metadata(env: &Env, issuer: Address) -> Option<IssuerMetadata>
     Storage::get_issuer_metadata(env, &issuer)
 }
 
+const MAXIssuer_NAME_LEN: u32 = 64;
+const MAXIssuer_URL_LEN: u32 = 256;
+const MAXIssuer_DESC_LEN: u32 = 512;
+
 pub fn set_issuer_metadata(env: &Env, issuer: Address, metadata: IssuerMetadata) -> Result<(), Error> {
     issuer.require_auth();
     Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
+
+    // Validate name length
+    let name_len = metadata.name.len();
+    if name_len > MAXIssuer_NAME_LEN {
+        return Err(Error::MetadataTooLong);
+    }
+
+    // Validate URL length and scheme
+    let url_len = metadata.url.len();
+    if url_len > MAXIssuer_URL_LEN {
+        return Err(Error::MetadataTooLong);
+    }
+    if url_len > 0 {
+        let url_slice = metadata.url.as_bytes();
+        if url_slice.len() < 6 || &url_slice[..6] != b"https:" {
+            return Err(Error::InvalidMetadata);
+        }
+    }
+
+    // Validate description length
+    let desc_len = metadata.description.len();
+    if desc_len > MAXIssuer_DESC_LEN {
+        return Err(Error::MetadataTooLong);
+    }
+
     Storage::set_issuer_metadata(env, &issuer, &metadata);
+    Events::issuer_metadata_updated(env, &issuer, &metadata);
     Ok(())
 }
 
@@ -305,13 +342,20 @@ pub fn get_bridge_list(env: &Env, start: u32, limit: u32) -> Vec<Address> {
 pub fn set_whitelist_enabled(env: &Env, issuer: Address, enabled: bool) -> Result<(), Error> {
     issuer.require_auth();
     Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
     Storage::set_whitelist_enabled(env, &issuer, enabled);
+    if enabled {
+        Events::whitelist_mode_enabled(env, &issuer);
+    } else {
+        Events::whitelist_mode_disabled(env, &issuer);
+    }
     Ok(())
 }
 
 pub fn enable_whitelist_mode(env: &Env, issuer: Address) -> Result<(), Error> {
     issuer.require_auth();
     Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
     Storage::set_whitelist_mode(env, &issuer, true);
     Events::whitelist_mode_enabled(env, &issuer);
     Ok(())
@@ -594,11 +638,40 @@ pub fn list_claim_types(env: &Env, start: u32, limit: u32) -> Vec<String> {
     crate::storage::paginate(env, &Storage::get_claim_type_list(env), start, limit)
 }
 
+const MAX_METADATA_LEN: u32 = 256;
+
 pub fn set_claim_type_constraints(env: &Env, admin: Address, claim_type: String, constraints: crate::types::ClaimTypeConstraints) -> Result<(), Error> {
     admin.require_auth();
     Validation::require_admin(env, &admin)?;
     Validation::validate_claim_type(&claim_type)?;
+    Validation::require_not_paused(env)?;
+
+    // Validate min <= max if both are set
+    if let (Some(min), Some(max)) = (constraints.min_metadata_len, constraints.max_metadata_len) {
+        if min > max {
+            return Err(Error::InvalidConfigValue);
+        }
+        if max > MAX_METADATA_LEN {
+            return Err(Error::MetadataTooLong);
+        }
+    }
+
+    // If min is set but require_metadata is false, warn but allow (for compatibility)
+    // In practice, this config is confusing but not technically invalid
+
     Storage::set_claim_type_constraints(env, &claim_type, &constraints);
+    Events::claim_type_constraints_updated(env, &claim_type, &Some(constraints));
+    Ok(())
+}
+
+pub fn clear_claim_type_constraints(env: &Env, admin: Address, claim_type: String) -> Result<(), Error> {
+    admin.require_auth();
+    Validation::require_admin(env, &admin)?;
+    Validation::validate_claim_type(&claim_type)?;
+    Validation::require_not_paused(env)?;
+
+    Storage::remove_claim_type_constraints(env, &claim_type);
+    Events::claim_type_constraints_updated(env, &claim_type, &None);
     Ok(())
 }
 
@@ -872,6 +945,56 @@ pub fn resolve_dispute(env: &Env, resolver: Address, attestation_id: String) -> 
     Storage::remove_dispute(env, &attestation_id);
     Events::dispute_resolved(env, &attestation_id, &resolver, env.ledger().timestamp());
     Ok(())
+}
+
+// -----------------------------------------------------------------------
+// Config & metadata getters
+// -----------------------------------------------------------------------
+
+/// Return a full snapshot of the contract configuration.
+///
+/// Falls back to sensible defaults for any field not yet explicitly set,
+/// ensuring backward compatibility with contracts initialised before a
+/// particular config key existed.
+pub fn get_config(env: &Env) -> ContractConfig {
+    if let Some(config) = Storage::get_contract_config(env) {
+        config
+    } else {
+        ContractConfig {
+            contract_name: soroban_sdk::String::from_str(env, "TrustLink"),
+            contract_version: soroban_sdk::String::from_str(env, ""),
+            contract_description: soroban_sdk::String::from_str(
+                env,
+                "On-chain attestation and verification system for the Stellar blockchain.",
+            ),
+            ttl_config: Storage::get_ttl_config(env).unwrap_or(TtlConfig { ttl_days: 30 }),
+            fee_config: Storage::get_fee_config(env).unwrap_or_else(|| FeeConfig {
+                attestation_fee: 0,
+                fee_collector: env.current_contract_address(),
+                fee_token: None,
+            }),
+            require_registered_claim_type: false,
+            metadata_hash_only: false,
+            max_attestations_per_subject: None,
+            chunk_size: get_chunk_size(env),
+        }
+    }
+}
+
+/// Return static contract metadata (name, version, description).
+///
+/// # Errors
+/// - [`Error::NotInitialized`] — contract has not been initialised.
+pub fn get_contract_metadata(env: &Env) -> Result<crate::types::ContractMetadata, Error> {
+    let version = Storage::get_version(env).ok_or(Error::NotInitialized)?;
+    Ok(crate::types::ContractMetadata {
+        name: soroban_sdk::String::from_str(env, "TrustLink"),
+        version,
+        description: soroban_sdk::String::from_str(
+            env,
+            "On-chain attestation and verification system for the Stellar blockchain.",
+        ),
+    })
 }
 
 // -----------------------------------------------------------------------
