@@ -6,7 +6,7 @@ use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{
     Attestation, AttestationStatus, AttestationVersionSnapshot, AuditEntry, Delegation,
-    DisputeRecord, Error, GlobalStats, RevocationList, RevocationListFormat,
+    DisputeRecord, DisputeStatus, Error, GlobalStats, RevocationList, RevocationListFormat,
 };
 use crate::validation::Validation;
 
@@ -113,6 +113,60 @@ pub fn has_all_claims(env: &Env, subject: Address, claim_types: Vec<String>) -> 
         return false;
     }
     true
+}
+
+/// Issue #1567: Check if a subject has a valid attestation of a specific claim type that is NOT under dispute.
+/// Verifiers can use this to enforce "valid and not under dispute" semantics.
+pub fn has_valid_undisputed_claim(env: &Env, subject: Address, claim_type: String) -> bool {
+    let attestation_ids = Storage::get_valid_attestations(env, &subject);
+    let current_time = env.ledger().timestamp();
+
+    for attestation_id in attestation_ids.iter() {
+        if let Ok(attestation) = Storage::get_attestation(env, &attestation_id) {
+            if attestation.claim_type != claim_type {
+                continue;
+            }
+            if attestation.get_status(current_time) == AttestationStatus::Valid {
+                // Check that there is no open dispute on this attestation
+                if let Some(dispute) = Storage::get_dispute(env, &attestation_id) {
+                    // Skip this attestation if there's an open dispute
+                    if dispute.status == DisputeStatus::Open {
+                        continue;
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Issue #1567: Check if a subject has a valid attestation from a specific issuer of a given claim type
+/// that is NOT under dispute.
+pub fn has_valid_undisputed_claim_from_issuer(
+    env: &Env,
+    subject: Address,
+    claim_type: String,
+    issuer: Address,
+) -> bool {
+    let attestation_ids = Storage::get_valid_attestations(env, &subject);
+    let current_time = env.ledger().timestamp();
+    for attestation_id in attestation_ids.iter() {
+        if let Ok(attestation) = Storage::get_attestation(env, &attestation_id) {
+            if attestation.claim_type == claim_type && attestation.issuer == issuer {
+                if attestation.get_status(current_time) == AttestationStatus::Valid {
+                    // Check that there is no open dispute on this attestation
+                    if let Some(dispute) = Storage::get_dispute(env, &attestation_id) {
+                        if dispute.status == DisputeStatus::Open {
+                            continue;
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Check if multiple subjects all have a valid attestation for the given claim type.
@@ -432,16 +486,10 @@ pub fn get_subject_attestation_count(env: &Env, subject: Address) -> u32 {
 }
 
 pub fn get_valid_claim_count(env: &Env, subject: Address) -> u32 {
-    let current_time = env.ledger().timestamp();
-    let mut count = 0u32;
-    for attestation_id in crate::storage::ChunkedIndex::get_subject_all(env, &subject).iter() {
-        if let Ok(attestation) = Storage::get_attestation(env, &attestation_id) {
-            if !attestation.deleted && attestation.get_status(current_time) == AttestationStatus::Valid {
-                count += 1;
-            }
-        }
-    }
-    count
+    // Issue #1570: Fixed to return distinct claim types (matching get_valid_claims().len())
+    // Previously this counted total attestations, creating a mismatch with get_valid_claims
+    let valid_claims = get_valid_claims(env, subject);
+    valid_claims.len() as u32
 }
 
 pub fn get_global_stats(env: &Env) -> GlobalStats {
@@ -613,6 +661,7 @@ pub fn dispute_attestation(
 ) -> Result<(), Error> {
     use crate::errors::Error as E;
     use crate::events::Events;
+    use crate::types::{DisputeRecord, DisputeStatus, AuditAction, AuditEntry};
 
     subject.require_auth();
 
@@ -623,9 +672,21 @@ pub fn dispute_attestation(
     if attestation.deleted {
         return Err(E::NotFound);
     }
-    if Storage::get_dispute(env, &attestation_id).is_some() {
-        return Err(E::AlreadyDisputed);
+    
+    // Issue #1567: Check if there's already an open dispute
+    if let Some(existing) = Storage::get_dispute(env, &attestation_id) {
+        if existing.status == DisputeStatus::Open {
+            return Err(E::AlreadyDisputed);
+        }
     }
+    
+    // Issue #1567: Reject disputes on revoked or expired attestations
+    let current_time = env.ledger().timestamp();
+    let status = attestation.get_status(current_time);
+    if status == AttestationStatus::Revoked || status == AttestationStatus::Expired {
+        return Err(E::InvalidAttestation); // or new error: CannotDisputeRevoked/Expired
+    }
+    
     if reason.len() > 256 {
         return Err(E::MetadataTooLong);
     }
@@ -638,8 +699,22 @@ pub fn dispute_attestation(
         subject: subject.clone(),
         reason: reason.clone(),
         disputed_at: timestamp,
+        status: DisputeStatus::Open,
+        resolved_by: None,
+        resolved_at: None,
+        resolution_note: None,
     };
     Storage::set_dispute(env, &attestation_id, &record);
+    
+    // Issue #1566: Add dispute to audit log
+    let audit_entry = AuditEntry {
+        action: AuditAction::Disputed,
+        actor: subject.clone(),
+        timestamp,
+        details: Some(reason.clone()),
+    };
+    Storage::append_audit_entry(env, &attestation_id, &audit_entry);
+    
     Events::dispute_raised(env, &attestation_id, &subject, &reason, timestamp);
     Ok(())
 }

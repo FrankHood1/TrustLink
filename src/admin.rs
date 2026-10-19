@@ -3,9 +3,10 @@ use soroban_sdk::{token::TokenClient, Address, Env, String, Vec};
 use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{
-    AdminCouncil, AttestationStatus, ClaimTypeInfo, ContractConfig, CouncilOperation, CouncilProposal, DecayConfig,
-    Delegation, DisputeRecord, Error, ExpirationHook, FeeConfig, IssuerMetadata, IssuerStats,
-    IssuerTier, PendingAdminTransfer, RateLimitConfig, StorageLimits, TtlConfig,
+    AdminCouncil, AuditAction, AuditEntry, ClaimTypeInfo, ContractConfig, CouncilOperation,
+    CouncilProposal, DecayConfig, Delegation, DisputeRecord, DisputeStatus, Error,
+    ExpirationHook, FeeConfig, IssuerMetadata, IssuerStats, IssuerTier, PendingAdminTransfer,
+    RateLimitConfig, StorageLimits, TtlConfig,
 };
 use crate::validation::Validation;
 
@@ -949,21 +950,50 @@ pub fn get_council_timelock_delay(env: &Env) -> u64 {
 // Dispute resolution (Issue #791)
 // -----------------------------------------------------------------------
 
-pub fn resolve_dispute(env: &Env, resolver: Address, attestation_id: String) -> Result<(), Error> {
+pub fn resolve_dispute(
+    env: &Env,
+    resolver: Address,
+    attestation_id: String,
+    resolution_note: Option<String>,
+) -> Result<(), Error> {
+    use crate::types::{DisputeStatus, AuditAction, AuditEntry};
+    
     resolver.require_auth();
 
     let attestation = Storage::get_attestation(env, &attestation_id)?;
     if attestation.issuer != resolver && !Storage::is_admin(env, &resolver) {
         return Err(Error::Unauthorized);
     }
-    if Storage::get_dispute(env, &attestation_id).is_none() {
-        return Err(Error::NotDisputed);
+    
+    let mut dispute = Storage::get_dispute(env, &attestation_id).ok_or(Error::NotDisputed)?;
+    
+    // Issue #1567: Cannot resolve already-resolved disputes
+    if dispute.status != DisputeStatus::Open {
+        return Err(Error::InvalidAttestation); // or new error: DisputeAlreadyResolved
     }
 
     Validation::require_not_paused(env)?;
 
-    Storage::remove_dispute(env, &attestation_id);
-    Events::dispute_resolved(env, &attestation_id, &resolver, env.ledger().timestamp());
+    let timestamp = env.ledger().timestamp();
+    
+    // Issue #1566: Record resolution outcome instead of deleting
+    dispute.status = DisputeStatus::Upheld; // Default to Upheld when resolver acts
+    dispute.resolved_by = Some(resolver.clone());
+    dispute.resolved_at = Some(timestamp);
+    dispute.resolution_note = resolution_note.clone();
+    
+    Storage::set_dispute(env, &attestation_id, &dispute);
+    
+    // Issue #1566: Add resolution to audit log
+    let audit_entry = AuditEntry {
+        action: AuditAction::DisputeResolved,
+        actor: resolver.clone(),
+        timestamp,
+        details: resolution_note,
+    };
+    Storage::append_audit_entry(env, &attestation_id, &audit_entry);
+    
+    Events::dispute_resolved(env, &attestation_id, &resolver, timestamp);
     Ok(())
 }
 

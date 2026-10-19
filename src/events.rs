@@ -444,6 +444,14 @@ impl Events {
         );
     }
 
+    /// Issue #1579: Emitted when an issuer updates an existing attestation template.
+    pub fn template_updated(env: &Env, issuer: &Address, template_id: &String) {
+        env.events().publish(
+            (symbol_short!("tmpl_upd"), issuer.clone()),
+            template_id.clone(),
+        );
+    }
+
     pub fn council_initialized(env: &Env, quorum: u32, member_count: u32) {
         env.events().publish(
             (symbol_short!("cncl_ini"),),
