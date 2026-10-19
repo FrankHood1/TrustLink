@@ -279,8 +279,8 @@ impl Storage {
         let key = StorageKey::Issuer(issuer.clone());
         let ttl = get_ttl_lifetime(env);
         env.storage().persistent().set(&key, &true);
-        env.storage().persistent().extend_ttl(&key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
-        
+        env.storage().persistent().extend_ttl(&key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
+
         // Initialize issuer metadata with Basic tier
         let metadata = IssuerMetadata {
             address: issuer.clone(),
@@ -288,7 +288,7 @@ impl Storage {
         };
         let metadata_key = StorageKey::IssuerMetadata(issuer.clone());
         env.storage().persistent().set(&metadata_key, &metadata);
-        env.storage().persistent().extend_ttl(&metadata_key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
+        env.storage().persistent().extend_ttl(&metadata_key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
         // Maintain ordered IssuerList
         let mut list = Self::get_issuer_list(env);
@@ -321,27 +321,15 @@ impl Storage {
         if !Self::is_issuer(env, issuer) {
             return Err(Error::NotFound);
         }
-        
+
         let mut metadata = Self::get_issuer_metadata(env, issuer)?;
         metadata.tier = tier;
-        
+
         let key = StorageKey::IssuerMetadata(issuer.clone());
         env.storage().persistent().set(&key, &metadata);
-        env.storage().persistent().extend_ttl(&key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
-        
+        env.storage().persistent().extend_ttl(&key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
+
         Ok(())
-        // Remove from IssuerList
-        let existing = Self::get_issuer_list(env);
-        let mut updated = Vec::new(env);
-        for addr in existing.iter() {
-            if &addr != issuer {
-                updated.push_back(addr);
-            }
-        }
-        let list_key = StorageKey::IssuerList;
-        let ttl = get_ttl_lifetime(env);
-        env.storage().persistent().set(&list_key, &updated);
-        env.storage().persistent().extend_ttl(&list_key, ttl, ttl);
     }
 
     pub fn get_issuer_list(env: &Env) -> Vec<Address> {
@@ -484,6 +472,28 @@ impl Storage {
 
     pub fn get_claim_type(env: &Env, claim_type: &String) -> Option<ClaimTypeInfo> {
         env.storage().persistent().get(&StorageKey::ClaimType(claim_type.clone()))
+    }
+
+    pub fn get_claim_type_status(env: &Env, claim_type: &String) -> crate::types::ClaimTypeStatus {
+        // Use a composite key by appending "_status" to avoid conflicts
+        let status_key = {
+            let mut key = claim_type.clone();
+            key.push_str("_status");
+            key
+        };
+        env.storage().instance().get(&StorageKey::ClaimType(status_key))
+            .unwrap_or(crate::types::ClaimTypeStatus::Active)
+    }
+
+    pub fn set_claim_type_status(env: &Env, claim_type: &String, status: crate::types::ClaimTypeStatus) {
+        // Use a composite key by appending "_status" to avoid conflicts
+        let status_key = {
+            let mut key = claim_type.clone();
+            key.push_str("_status");
+            key
+        };
+        env.storage().instance().set(&StorageKey::ClaimType(status_key), &status);
+        env.storage().instance().extend_ttl(DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
     }
 
     pub fn get_claim_type_list(env: &Env) -> Vec<String> {

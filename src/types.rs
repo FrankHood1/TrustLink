@@ -205,6 +205,14 @@ pub struct ContractConfig {
     pub chunk_size: u32,
 }
 
+/// Status of a registered claim type.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClaimTypeStatus {
+    Active = 0,
+    Deprecated = 1,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimTypeInfo {

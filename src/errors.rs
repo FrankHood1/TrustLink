@@ -92,4 +92,8 @@ pub enum Error {
     VersionMismatch = 47,
     /// Feature not yet implemented.
     NotImplemented = 48,
+    /// Description exceeds maximum length of 256 bytes.
+    DescriptionTooLong = 49,
+    /// Claim type is deprecated and cannot be used for new attestations.
+    ClaimTypeDeprecated = 50,
 }

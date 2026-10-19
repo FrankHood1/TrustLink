@@ -175,6 +175,13 @@ impl Events {
         );
     }
 
+    pub fn claim_type_status_changed(env: &Env, claim_type: &String, status: crate::types::ClaimTypeStatus) {
+        env.events().publish(
+            (TOPIC_CLM_TYPE, claim_type.clone()),
+            status,
+        );
+    }
+
     pub fn multisig_proposed(
         env: &Env,
         proposal_id: &String,

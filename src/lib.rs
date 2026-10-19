@@ -33,7 +33,6 @@ pub(crate) mod callback {
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 use types::{Attestation, AttestationStatus, Error, IssuerTier};
 use storage::Storage;
-use validation::Validation;
 use events::Events;
 
 /// The TrustLink smart contract.
@@ -41,10 +40,8 @@ use events::Events;
 /// Provides a shared attestation infrastructure: admins manage a registry of
 /// trusted issuers, issuers create and revoke attestations, and any caller can
 /// verify claims against the registry.
-use crate::events::Events;
-use crate::storage::Storage;
 use crate::types::{
-    AdminCouncil, Attestation, AttestationRequest, AttestationStatus, AttestationTemplate,
+    AdminCouncil, AttestationRequest, AttestationStatus, AttestationTemplate,
     AttestationVersionSnapshot, AuditAction, AuditEntry, ClaimTypeInfo, CouncilOperation, CouncilProposal,
     ContractConfig, ContractMetadata, DecayConfig, Delegation, DisputeRecord, Endorsement, Error,
     ExpirationHook, FeeConfig, GlobalStats, HealthStatus, IssuerMetadata, IssuerStats, IssuerTier,
@@ -140,14 +137,6 @@ impl TrustLinkContract {
     /// ```ignore
     /// client.set_issuer_tier(&admin, &issuer_address, &IssuerTier::Premium);
     /// ```
-    pub fn set_issuer_tier(env: Env, admin: Address, issuer: Address, tier: IssuerTier) -> Result<(), Error> {
-        admin.require_auth();
-        Validation::require_admin(&env, &admin)?;
-
-        Storage::set_issuer_tier(&env, &issuer, tier.clone())?;
-        Events::issuer_tier_updated(&env, &issuer, &tier);
-        Ok(())
-    }
 
     /// Create a new attestation about a subject address.
     ///
@@ -378,6 +367,10 @@ impl TrustLinkContract {
 
     pub fn register_claim_type(env: Env, admin: Address, claim_type: String, description: String) -> Result<(), Error> {
         admin::register_claim_type(&env, admin, claim_type, description)
+    }
+
+    pub fn set_claim_type_status(env: Env, admin: Address, claim_type: String, status: types::ClaimTypeStatus) -> Result<(), Error> {
+        admin::set_claim_type_status(&env, admin, claim_type, status)
     }
 
     #[must_use]
@@ -1219,39 +1212,6 @@ impl TrustLinkContract {
         Storage::get_template(&env, &issuer, &template_id).ok_or(Error::NotFound)
     }
 
-    /// Get the tier level for an issuer.
-    ///
-    /// # Parameters
-    /// - `issuer` — issuer address to query.
-    ///
-    /// # Returns
-    /// The issuer's current [`IssuerTier`].
-    ///
-    /// # Errors
-    /// - [`Error::NotFound`] — `issuer` is not registered.
-    ///
-    /// # Examples
-    /// ```ignore
-    /// let tier = client.get_issuer_tier(&issuer_address);
-    /// ```
-    pub fn get_issuer_tier(env: Env, issuer: Address) -> Result<IssuerTier, Error> {
-        let metadata = Storage::get_issuer_metadata(&env, &issuer)?;
-        Ok(metadata.tier)
-    }
-}
-
-    // -----------------------------------------------------------------------
-    // Bundle Queries
-    // -----------------------------------------------------------------------
-
-    pub fn get_bundle(env: Env, bundle_id: String) -> Result<crate::types::AttestationBundle, Error> {
-        Storage::get_bundle(&env, &bundle_id).ok_or(Error::NotFound)
-    }
-
-    pub fn get_bundle_attestations(env: Env, bundle_id: String) -> Result<Vec<Attestation>, Error> {
-        bundle::get_bundle_attestations(&env, &bundle_id)
-    }
-
     pub fn is_bundle_valid(env: Env, bundle_id: String) -> Result<bool, Error> {
         bundle::is_bundle_valid(&env, &bundle_id)
     }
@@ -1263,3 +1223,4 @@ impl TrustLinkContract {
     pub fn get_subject_bundles(env: Env, subject: Address) -> Vec<String> {
         Storage::get_subject_bundles(&env, &subject)
     }
+}
