@@ -2,7 +2,16 @@
 
 from typing import TypedDict, Optional, List, Literal
 
-AttestationStatus = Literal["Valid", "Expired", "Revoked"]
+AttestationStatus = Literal["Valid", "Expired", "Revoked", "Pending"]
+
+# Matches RequestStatus on-chain enum (src/types.rs).
+# - Pending:   open, not yet fulfilled or rejected.
+# - Fulfilled: issuer created an attestation from this request.
+# - Rejected:  issuer explicitly rejected the request.
+# - Cancelled: subject cancelled the request before it was processed.
+# - Expired:   expires_at passed without fulfillment; computed on read or
+#              persisted by cleanup_expired_requests.
+RequestStatus = Literal["Pending", "Fulfilled", "Rejected", "Cancelled", "Expired"]
 
 
 class Attestation(TypedDict):
@@ -20,6 +29,24 @@ class Attestation(TypedDict):
     source_chain: Optional[str]
     source_tx: Optional[str]
     bundle_id: Optional[str]
+
+
+class AttestationRequest(TypedDict):
+    """A pull-based attestation request submitted by a subject to an issuer.
+
+    The ``status`` field reflects the on-chain ``RequestStatus`` enum.
+    A request that is still ``Pending`` but whose ``expires_at`` has passed
+    will be returned as ``Expired`` by the contract's ``get_attestation_request``
+    entrypoint (computed lazily on read, or eagerly by ``cleanup_expired_requests``).
+    """
+    id: str
+    subject: str
+    issuer: str
+    claim_type: str
+    timestamp: int
+    expires_at: int
+    status: RequestStatus
+    rejection_reason: Optional[str]
 
 
 class AttestationBundle(TypedDict):

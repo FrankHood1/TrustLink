@@ -4,8 +4,8 @@ use crate::constants::SECS_PER_DAY;
 use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{
-    Attestation, AttestationOrigin, AttestationVersionSnapshot, AuditAction, AuditEntry,
-    Endorsement, Error, FeeConfig,
+    Attestation, AttestationOrigin, AttestationStatus, AttestationVersionSnapshot, AuditAction,
+    AuditEntry, Endorsement, Error, FeeConfig,
 };
 use crate::validation::Validation;
 
@@ -144,31 +144,36 @@ pub fn validate_jurisdiction(env: &Env, jurisdiction: &Option<String>) -> Result
 }
 
 pub fn check_rate_limit(env: &Env, issuer: &Address, claim_type: &String) -> Result<(), Error> {
-    // When a per-claim-type limit is configured, track issuance time separately
-    // for each claim type so limits for different types remain independent.
-    let (interval, per_claim_type) = if let Some(claim_limit) = Storage::get_claim_type_rate_limit(env, claim_type) {
-        (claim_limit, true)
-    } else if let Some(config) = Storage::get_rate_limit_config(env) {
-        (config.min_issuance_interval, false)
-    } else {
-        return Ok(());
-    };
-
-    if interval == 0 {
-        return Ok(());
-    }
-
     let current_time = env.ledger().timestamp();
-    let last = if per_claim_type {
-        Storage::get_last_issuance_time_by_claim_type(env, issuer, claim_type)
-    } else {
-        Storage::get_last_issuance_time(env, issuer)
-    };
-    if let Some(last) = last {
-        if current_time.saturating_sub(last) < interval {
-            return Err(Error::RateLimited);
+
+    // Always enforce the global rate limit when configured.  The per-claim-type
+    // limit is checked *in addition* to — not instead of — the global limit.
+    if let Some(config) = Storage::get_rate_limit_config(env) {
+        let interval = config.min_issuance_interval;
+        if interval > 0 {
+            if let Some(last) = Storage::get_last_issuance_time(env, issuer) {
+                if current_time.saturating_sub(last) < interval {
+                    return Err(Error::RateLimited);
+                }
+            }
         }
     }
+
+    // Additionally enforce any per-claim-type rate limit, independently of the
+    // global limit.  Both must pass — the per-claim-type limit does not replace
+    // the global one.
+    if let Some(claim_interval) = Storage::get_claim_type_rate_limit(env, claim_type) {
+        if claim_interval > 0 {
+            if let Some(last) =
+                Storage::get_last_issuance_time_by_claim_type(env, issuer, claim_type)
+            {
+                if current_time.saturating_sub(last) < claim_interval {
+                    return Err(Error::RateLimited);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -177,23 +182,39 @@ pub fn load_fee_config(env: &Env) -> Result<FeeConfig, Error> {
 }
 
 pub fn charge_attestation_fee(env: &Env, issuer: &Address) -> Result<(), Error> {
+    charge_attestation_fees(env, issuer, 1)
+}
+
+/// Charge the fee for `count` attestations with a single token transfer.
+///
+/// # Errors
+/// - [`Error::InvalidFee`] — `attestation_fee * count` overflows.
+/// - [`Error::FeeTokenRequired`] — a fee is set but no fee token is configured.
+pub fn charge_attestation_fees(env: &Env, issuer: &Address, count: u32) -> Result<(), Error> {
     let fee_config = load_fee_config(env)?;
-    if fee_config.attestation_fee == 0 {
+    if fee_config.attestation_fee == 0 || count == 0 {
         return Ok(());
     }
+    let total = fee_config
+        .attestation_fee
+        .checked_mul(count as i128)
+        .ok_or(Error::InvalidFee)?;
     let fee_token = fee_config.fee_token.ok_or(Error::FeeTokenRequired)?;
-    TokenClient::new(env, &fee_token).transfer(issuer, &fee_config.fee_collector, &fee_config.attestation_fee);
+    TokenClient::new(env, &fee_token).transfer(issuer, &fee_config.fee_collector, &total);
     Ok(())
 }
 
 pub fn store_attestation(env: &Env, attestation: &Attestation) {
     Storage::set_attestation(env, attestation);
-    // Write to both the legacy flat index (for backwards-compatible reads) and
-    // the new chunked index (for efficient paginated queries).
-    Storage::add_subject_attestation(env, &attestation.subject, &attestation.id);
-    Storage::add_issuer_attestation(env, &attestation.issuer, &attestation.id);
+    // Write the attestation ID to the two authoritative subject indexes:
+    //   1. ChunkedIndex  — used for paginated listings
+    //   2. ValidAttestations — pre-filtered index for has_valid_claim fast-path
+    // The legacy flat SubjectAttestations key is NOT written here; it is only
+    // kept as a read-path alias backed by ChunkedIndex (issue #1550 — three
+    // parallel writes tripled write cost and created drift risk).
     Storage::add_valid_attestation(env, &attestation.subject, &attestation.id);
     crate::storage::ChunkedIndex::add_subject(env, &attestation.subject, &attestation.id);
+    Storage::add_issuer_attestation(env, &attestation.issuer, &attestation.id);
     crate::storage::ChunkedIndex::add_issuer(env, &attestation.issuer, &attestation.id);
     let mut stats = Storage::get_issuer_stats(env, &attestation.issuer);
     stats.total_issued += 1;
@@ -225,6 +246,26 @@ pub fn maybe_trigger_expiration_hook(
 // Attestation creation
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// Shared validation for all attestation creation paths
+// -----------------------------------------------------------------------
+
+pub fn validate_new_attestation_common(
+    env: &Env,
+    issuer: &Address,
+    subject: &Address,
+    claim_type: &String,
+) -> Result<(), Error> {
+    Validation::validate_claim_type(claim_type)?;
+    Validation::require_registered_claim_type(env, claim_type)?;
+    
+    if issuer == subject {
+        return Err(Error::Unauthorized);
+    }
+    
+    Ok(())
+}
+
 pub fn create_attestation_internal(
     env: &Env,
     issuer: Address,
@@ -239,8 +280,7 @@ pub fn create_attestation_internal(
     issuer.require_auth();
     Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
-    Validation::validate_claim_type(&claim_type)?;
-    Validation::require_registered_claim_type(env, &claim_type)?;
+    validate_new_attestation_common(env, &issuer, &subject, &claim_type)?;
     Validation::validate_metadata(env, &metadata)?;
     Validation::validate_claim_constraints(env, &claim_type, &metadata)?;
     Validation::validate_metadata_hash_only(env, &metadata)?;
@@ -248,10 +288,6 @@ pub fn create_attestation_internal(
     validate_tags(&tags)?;
     validate_native_expiration(env, expiration)?;
     validate_valid_from(env, valid_from)?;
-
-    if issuer == subject {
-        return Err(Error::Unauthorized);
-    }
 
     if Storage::is_whitelist_mode(env, &issuer) && !Storage::is_whitelisted(env, &issuer, &subject) {
         return Err(Error::SubjectNotWhitelisted);
@@ -268,14 +304,14 @@ pub fn create_attestation_internal(
     // Check optional per-subject limit from ContractConfig if configured
     if let Some(config) = Storage::get_contract_config(env) {
         if let Some(max_per_subject) = config.max_attestations_per_subject {
-            let subject_count = Storage::get_subject_attestations(env, &subject).len();
+            let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
             if subject_count >= max_per_subject {
                 return Err(Error::LimitExceeded);
             }
         }
     } else {
         // Fallback to StorageLimits for backward compatibility if no config is set
-        let subject_count = Storage::get_subject_attestations(env, &subject).len();
+        let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
         if subject_count >= limits.max_attestations_per_subject {
             return Err(Error::LimitExceeded);
         }
@@ -406,6 +442,7 @@ pub fn import_attestation(
     Validation::require_admin(env, &admin)?;
     Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
+    validate_new_attestation_common(env, &issuer, &subject, &claim_type)?;
     validate_import_timestamps(env, timestamp, expiration)?;
 
     let limits = Storage::get_limits(env);
@@ -417,14 +454,14 @@ pub fn import_attestation(
     // Check optional per-subject limit from ContractConfig if configured
     if let Some(config) = Storage::get_contract_config(env) {
         if let Some(max_per_subject) = config.max_attestations_per_subject {
-            let subject_count = Storage::get_subject_attestations(env, &subject).len();
+            let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
             if subject_count >= max_per_subject {
                 return Err(Error::LimitExceeded);
             }
         }
     } else {
         // Fallback to StorageLimits for backward compatibility if no config is set
-        let subject_count = Storage::get_subject_attestations(env, &subject).len();
+        let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
         if subject_count >= limits.max_attestations_per_subject {
             return Err(Error::LimitExceeded);
         }
@@ -483,6 +520,7 @@ pub fn bridge_attestation(
     bridge.require_auth();
     Validation::require_bridge(env, &bridge)?;
     Validation::require_not_paused(env)?;
+    validate_new_attestation_common(env, &bridge, &subject, &claim_type)?;
     validate_source_reference(&source_chain, &source_tx)?;
 
     // Check limits before creating attestation
@@ -495,14 +533,14 @@ pub fn bridge_attestation(
     // Check optional per-subject limit from ContractConfig if configured
     if let Some(config) = Storage::get_contract_config(env) {
         if let Some(max_per_subject) = config.max_attestations_per_subject {
-            let subject_count = Storage::get_subject_attestations(env, &subject).len();
+            let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
             if subject_count >= max_per_subject {
                 return Err(Error::LimitExceeded);
             }
         }
     } else {
         // Fallback to StorageLimits for backward compatibility if no config is set
-        let subject_count = Storage::get_subject_attestations(env, &subject).len();
+        let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
         if subject_count >= limits.max_attestations_per_subject {
             return Err(Error::LimitExceeded);
         }
@@ -562,7 +600,10 @@ pub fn create_attestations_batch(
     Validation::validate_claim_type(&claim_type)?;
     Validation::require_registered_claim_type(env, &claim_type)?;
     validate_native_expiration(env, expiration)?;
-    check_rate_limit(env, &issuer, &claim_type)?;
+    // Rate-limit check is performed per-subject inside the loop so that each
+    // individual issuance in a batch consumes its own rate-limit slot.  A single
+    // check before the loop would allow a batch of N subjects to bypass the
+    // configured issuance interval entirely.
 
     let timestamp = env.ledger().timestamp();
     let limits = Storage::get_limits(env);
@@ -577,11 +618,23 @@ pub fn create_attestations_batch(
     let mut new_issuer_ids: Vec<String> = Vec::new(env);
 
     for subject in subjects.iter() {
+        // Enforce rate limits per individual issuance so the full batch cannot
+        // bypass a configured issuance interval.  The last-issuance timestamp is
+        // updated immediately after each successful check so the next iteration
+        // (and the next transaction) both see the correct state.
+        check_rate_limit(env, &issuer, &claim_type)?;
+        // Record the issuance timestamp right away so subsequent loop iterations
+        // are checked against it.
+        Storage::set_last_issuance_time(env, &issuer, timestamp);
+        if Storage::get_claim_type_rate_limit(env, &claim_type).is_some() {
+            Storage::set_last_issuance_time_by_claim_type(env, &issuer, &claim_type, timestamp);
+        }
+
         let attestation_id = Attestation::generate_id(env, &issuer, &subject, &claim_type, timestamp);
         if Storage::has_attestation(env, &attestation_id) {
             return Err(Error::DuplicateAttestation);
         }
-        let subject_count = Storage::get_subject_attestations(env, &subject).len();
+        let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
         if subject_count >= limits.max_attestations_per_subject {
             return Err(Error::LimitExceeded);
         }
@@ -607,7 +660,8 @@ pub fn create_attestations_batch(
 
         // Write attestation record and per-subject index — issuer index deferred.
         Storage::set_attestation(env, &attestation);
-        Storage::add_subject_attestation(env, &subject, &attestation_id);
+        // Only write to ChunkedIndex and ValidAttestations — not the legacy flat
+        // SubjectAttestations key — to consolidate subject writes (issue #1550).
         Storage::add_valid_attestation(env, &subject, &attestation_id);
         crate::storage::ChunkedIndex::add_subject(env, &subject, &attestation_id);
 
@@ -649,10 +703,8 @@ pub fn create_attestations_batch(
     // Single write: global stats (replaces N increment_total_attestations calls).
     Storage::increment_total_attestations(env, batch_len as u64);
 
-    Storage::set_last_issuance_time(env, &issuer, timestamp);
-    if Storage::get_claim_type_rate_limit(env, &claim_type).is_some() {
-        Storage::set_last_issuance_time_by_claim_type(env, &issuer, &claim_type, timestamp);
-    }
+    // Last-issuance timestamps are updated per-item inside the loop above so
+    // that each subject issuance consumes its own rate-limit slot.
     Ok(ids)
 }
 
@@ -862,20 +914,33 @@ pub fn transfer_attestation(
 ) -> Result<(), Error> {
     admin.require_auth();
     Validation::require_admin(env, &admin)?;
+    Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &new_issuer)?;
 
     let mut attestation = Storage::get_attestation(env, &attestation_id)?;
     let old_issuer = attestation.issuer.clone();
 
+    // Reject revoked or deleted attestations
+    if attestation.revoked || attestation.deleted {
+        return Err(Error::InvalidStatus);
+    }
+
+    // Reject self-attestation (new_issuer == subject)
+    if new_issuer == attestation.subject {
+        return Err(Error::Unauthorized);
+    }
+
     if old_issuer == new_issuer {
         return Ok(());
     }
 
+    // Clean both the legacy flat index and the new chunked index
     Storage::remove_issuer_attestation(env, &old_issuer, &attestation_id);
     Storage::add_issuer_attestation(env, &new_issuer, &attestation_id);
     crate::storage::ChunkedIndex::remove_issuer(env, &old_issuer, &attestation_id);
     crate::storage::ChunkedIndex::add_issuer(env, &new_issuer, &attestation_id);
 
+    // Move issuer stats
     let mut old_stats = Storage::get_issuer_stats(env, &old_issuer);
     old_stats.total_issued = old_stats.total_issued.saturating_sub(1);
     Storage::set_issuer_stats(env, &old_issuer, &old_stats);
@@ -884,6 +949,7 @@ pub fn transfer_attestation(
     new_stats.total_issued = new_stats.total_issued.saturating_add(1);
     Storage::set_issuer_stats(env, &new_issuer, &new_stats);
 
+    // Update attestation with new issuer
     attestation.issuer = new_issuer.clone();
     Storage::set_attestation(env, &attestation);
 
@@ -989,15 +1055,32 @@ pub fn amend_attestation(
 
 pub fn endorse_attestation(env: &Env, endorser: Address, attestation_id: String) -> Result<(), Error> {
     endorser.require_auth();
-    Validation::require_issuer(env, &endorser)?;
     Validation::require_not_paused(env)?;
+    Validation::require_issuer(env, &endorser)?;
 
     let attestation = Storage::get_attestation(env, &attestation_id)?;
+
+    // Reject self-endorsement by the issuer
     if attestation.issuer == endorser {
         return Err(Error::CannotEndorseOwn);
     }
+
+    // Reject self-endorsement by the subject
+    if attestation.subject == endorser {
+        return Err(Error::CannotEndorseOwn);
+    }
+
     if attestation.revoked {
         return Err(Error::AlreadyRevoked);
+    }
+
+    // Reject expired, pending (valid_from in the future), or GDPR-deleted attestations
+    let now = env.ledger().timestamp();
+    if attestation.get_status(now) != AttestationStatus::Valid {
+        return Err(Error::AttestationNotValid);
+    }
+    if attestation.deleted {
+        return Err(Error::AttestationNotValid);
     }
 
     let existing = Storage::get_endorsements(env, &attestation_id);
@@ -1007,12 +1090,17 @@ pub fn endorse_attestation(env: &Env, endorser: Address, attestation_id: String)
         }
     }
 
+    let timestamp = env.ledger().timestamp();
     let endorsement = Endorsement {
         attestation_id: attestation_id.clone(),
         endorser: endorser.clone(),
-        timestamp: env.ledger().timestamp(),
+        timestamp,
     };
     Storage::add_endorsement(env, &attestation_id, &endorsement);
+
+    // Emit event for indexer and reputation dashboards
+    Events::attestation_endorsed(env, &attestation_id, &endorser, timestamp);
+
     Ok(())
 }
 
@@ -1072,7 +1160,7 @@ pub fn create_attestation_as_delegate(
     if Storage::get_issuer_attestations(env, &delegator).len() >= limits.max_attestations_per_issuer {
         return Err(Error::LimitExceeded);
     }
-    if Storage::get_subject_attestations(env, &subject).len() >= limits.max_attestations_per_subject {
+    if crate::storage::ChunkedIndex::subject_count(env, &subject) >= limits.max_attestations_per_subject {
         return Err(Error::LimitExceeded);
     }
 
@@ -1187,7 +1275,7 @@ pub fn simulate_create_attestation(
     if issuer_count >= limits.max_attestations_per_issuer {
         return Err(Error::LimitExceeded);
     }
-    let subject_count = Storage::get_subject_attestations(env, &subject).len();
+    let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
     if subject_count >= limits.max_attestations_per_subject {
         return Err(Error::LimitExceeded);
     }
@@ -1208,4 +1296,133 @@ pub fn simulate_create_attestation(
     };
 
     Ok((attestation_id, fee_amount))
+}
+
+// -----------------------------------------------------------------------
+// Bundle operations
+// -----------------------------------------------------------------------
+
+/// Create a bundle of attestations for multiple subjects with the same claim type.
+/// Each attestation is added to the bundle independently via store_attestation.
+/// No redundant indexing or stats updates occur.
+pub fn create_attestation_bundle(
+    env: &Env,
+    issuer: Address,
+    subjects: Vec<Address>,
+    claim_type: String,
+    expiration: Option<u64>,
+) -> Result<String, Error> {
+    issuer.require_auth();
+    Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
+    validate_new_attestation_common(env, &issuer, &subjects.get(0).ok_or(Error::LimitExceeded)?, &claim_type)?;
+    validate_native_expiration(env, expiration)?;
+    check_rate_limit(env, &issuer, &claim_type)?;
+
+    let timestamp = env.ledger().timestamp();
+    let limits = Storage::get_limits(env);
+    let issuer_count = Storage::get_issuer_attestations(env, &issuer).len();
+    if issuer_count.saturating_add(subjects.len()) > limits.max_attestations_per_issuer {
+        return Err(Error::LimitExceeded);
+    }
+
+    let mut attestation_ids: Vec<String> = Vec::new(env);
+
+    for subject in subjects.iter() {
+        if issuer == subject {
+            return Err(Error::Unauthorized);
+        }
+
+        let attestation_id = Attestation::generate_id(env, &issuer, &subject, &claim_type, timestamp);
+        if Storage::has_attestation(env, &attestation_id) {
+            return Err(Error::DuplicateAttestation);
+        }
+
+        let subject_count = Storage::get_subject_attestations(env, &subject).len();
+        if subject_count >= limits.max_attestations_per_subject {
+            return Err(Error::LimitExceeded);
+        }
+
+        let attestation = Attestation {
+            id: attestation_id.clone(),
+            issuer: issuer.clone(),
+            subject: subject.clone(),
+            claim_type: claim_type.clone(),
+            timestamp,
+            expiration,
+            revoked: false,
+            deleted: false,
+            metadata: None,
+            jurisdiction: None,
+            valid_from: None,
+            origin: AttestationOrigin::Native,
+            source_chain: None,
+            source_tx: None,
+            tags: None,
+            revocation_reason: None,
+        };
+
+        // Rely on store_attestation only - no redundant indexing or stats updates
+        store_attestation(env, &attestation);
+        Storage::append_audit_entry(
+            env,
+            &attestation_id,
+            &AuditEntry {
+                action: AuditAction::Created,
+                actor: issuer.clone(),
+                timestamp,
+                details: None,
+            },
+        );
+        Events::attestation_created(env, &attestation);
+        attestation_ids.push_back(attestation_id);
+    }
+
+    let bundle_id = crate::types::AttestationBundle::generate_id(env, &issuer, &claim_type, timestamp);
+    let bundle = crate::types::AttestationBundle {
+        id: bundle_id.clone(),
+        issuer: issuer.clone(),
+        claim_type,
+        attestation_ids,
+        created_at: timestamp,
+        all_valid: true,
+    };
+
+    Storage::set_bundle(env, &bundle);
+    Storage::set_last_issuance_time(env, &issuer, timestamp);
+    if Storage::get_claim_type_rate_limit(env, &bundle.claim_type).is_some() {
+        Storage::set_last_issuance_time_by_claim_type(env, &issuer, &bundle.claim_type, timestamp);
+    }
+
+    charge_attestation_fee(env, &issuer)?;
+
+    Events::bundle_created(env, &bundle_id, &issuer, bundle.attestation_ids.len());
+    Ok(bundle_id)
+}
+
+/// Query the validity of a bundle: checks expiration of each member and returns
+/// whether all members are currently valid (not revoked, not deleted, not expired).
+/// This is a pure getter function with no side effects.
+pub fn is_bundle_valid(env: &Env, bundle_id: String) -> Result<bool, Error> {
+    let bundle = Storage::get_bundle(env, &bundle_id)?;
+    let current_time = env.ledger().timestamp();
+
+    for attestation_id in bundle.attestation_ids.iter() {
+        match Storage::get_attestation(env, &attestation_id) {
+            Ok(attestation) => {
+                // Check status properly: revoked, deleted, expired, or not-yet-valid members make bundle invalid
+                let status = attestation.get_status(current_time);
+                match status {
+                    crate::types::AttestationStatus::Valid => {},
+                    _ => return Ok(false),
+                }
+            }
+            Err(_) => {
+                // Missing attestations make bundle invalid
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
 }

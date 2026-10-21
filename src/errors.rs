@@ -55,6 +55,8 @@ pub enum Error {
     LimitExceeded = 29,
     /// The proposal has been cancelled by the proposer.
     ProposalCancelled = 30,
+    /// Attestation is in an invalid state (revoked, deleted, or otherwise cannot be transferred).
+    InvalidStatus = 31,
     /// Dispute has already been raised for this attestation.
     AlreadyDisputed = 31,
     /// Metadata does not match required format or constraints.
@@ -92,4 +94,12 @@ pub enum Error {
     VersionMismatch = 47,
     /// Feature not yet implemented.
     NotImplemented = 48,
+    /// Attestation is not valid (expired, pending, or deleted).
+    AttestationNotValid = 49,
+    /// Invalid configuration value (e.g., min > max for constraints).
+    InvalidConfigValue = 49,
+    /// Description exceeds maximum length of 256 bytes.
+    DescriptionTooLong = 50,
+    /// Claim type is deprecated and cannot be used for new attestations.
+    ClaimTypeDeprecated = 51,
 }

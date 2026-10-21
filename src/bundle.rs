@@ -6,8 +6,8 @@
 use soroban_sdk::{xdr::ToXdr, Env, Address, String, Vec, Bytes};
 
 use crate::attestation::{
-    store_attestation, charge_attestation_fee, check_rate_limit,
-    validate_native_expiration, validate_tags, validate_jurisdiction,
+    store_attestation, charge_attestation_fees, check_rate_limit,
+    validate_native_expiration, validate_tags,
 };
 use crate::storage::Storage;
 use crate::types::{
@@ -76,6 +76,18 @@ pub fn create_attestation_bundle(
         return Err(Error::LimitExceeded);
     }
 
+    // Reject repeated claim types: they hash to the same attestation ID and
+    // would overwrite each other while indexes, stats and fees apply twice.
+    // O(n²) is fine for n <= MAX_BUNDLE_SIZE.
+    for i in 0..claim_types.len() {
+        let claim_type = claim_types.get_unchecked(i);
+        for j in (i + 1)..claim_types.len() {
+            if claim_types.get_unchecked(j) == claim_type {
+                return Err(Error::DuplicateInput);
+            }
+        }
+    }
+
     // Validate all claim types are registered before starting
     for claim_type in claim_types.iter() {
         Validation::validate_claim_type(&claim_type)?;
@@ -85,6 +97,11 @@ pub fn create_attestation_bundle(
     // Validate metadata and tags (once, shared for all in bundle)
     Validation::validate_metadata(env, &metadata)?;
     Validation::validate_metadata_hash_only(env, &metadata)?;
+
+    // The shared metadata must satisfy every claim type's constraints.
+    for claim_type in claim_types.iter() {
+        Validation::validate_claim_constraints(env, &claim_type, &metadata)?;
+    }
     validate_tags(&tags)?;
     validate_native_expiration(env, expiration)?;
 
@@ -108,7 +125,7 @@ pub fn create_attestation_bundle(
 
     let limits = Storage::get_limits(env);
     let issuer_count = Storage::get_issuer_attestations(env, &issuer).len();
-    let subject_count = Storage::get_subject_attestations(env, &subject).len();
+    let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
 
     // Verify storage limits can accommodate entire bundle
     if issuer_count.saturating_add(claim_types.len()) > limits.max_attestations_per_issuer {
@@ -172,15 +189,13 @@ pub fn create_attestation_bundle(
     let mut new_issuer_ids: Vec<String> = Vec::new(env);
 
     for attestation in attestations.iter() {
-        // Store attestation with bundle_id
+        // store_attestation handles all index writes (ChunkedIndex + ValidAttestations
+        // + issuer indexes).  Do NOT add to any subject index again here — that was
+        // the triple-write bug fixed by issue #1550.
         store_attestation(env, &attestation);
-        
-        // Add to subject's attestation index
-        Storage::add_subject_attestation(env, &attestation.subject, &attestation.id);
-        Storage::add_valid_attestation(env, &attestation.subject, &attestation.id);
-        crate::storage::ChunkedIndex::add_subject(env, &attestation.subject, &attestation.id);
 
-        // Queue for issuer index batch write
+        // Queue for issuer index batch write (store_attestation already wrote the
+        // per-attestation issuer entry; we accumulate IDs here only for the audit log).
         new_issuer_ids.push_back(attestation.id.clone());
 
         // Audit log
@@ -214,8 +229,6 @@ pub fn create_attestation_bundle(
 
     // Update stats
     let bundle_size = attestation_ids.len();
-    Storage::increment_issuer_stats(env, &issuer, bundle_size);
-    Storage::increment_total_attestations(env, bundle_size as u64);
 
     // Set issuance timestamps
     Storage::set_last_issuance_time(env, &issuer, timestamp);
@@ -240,10 +253,8 @@ pub fn create_attestation_bundle(
     Storage::add_issuer_bundle(env, &issuer, &bundle_id);
     Storage::add_subject_bundle(env, &subject, &bundle_id);
 
-    // Charge fees for all attestations in the bundle
-    for _ in 0..bundle_size {
-        charge_attestation_fee(env, &issuer)?;
-    }
+    // Charge fees for all attestations in the bundle with one token transfer
+    charge_attestation_fees(env, &issuer, bundle_size)?;
 
     // Emit bundle_created event
     crate::events::Events::bundle_created(env, &bundle);
@@ -295,4 +306,24 @@ fn format_bundle_audit_detail(env: &Env, bundle_id: &String) -> String {
     detail_bytes[..PREFIX.len()].copy_from_slice(PREFIX);
     detail_bytes[PREFIX.len()..].copy_from_slice(&id_bytes);
     String::from_bytes(env, &detail_bytes)
+}
+
+/// Retrieve bundle metadata by ID.
+///
+/// # Errors
+/// - [`Error::NotFound`] — no bundle with the given ID exists.
+pub fn get_bundle(env: &Env, bundle_id: String) -> Result<AttestationBundle, Error> {
+    Storage::get_bundle(env, &bundle_id).ok_or(Error::NotFound)
+}
+
+/// Return the ordered list of bundle IDs created by `issuer`.
+#[must_use]
+pub fn get_issuer_bundles(env: &Env, issuer: Address) -> Vec<String> {
+    Storage::get_issuer_bundles(env, &issuer)
+}
+
+/// Return the ordered list of bundle IDs issued to `subject`.
+#[must_use]
+pub fn get_subject_bundles(env: &Env, subject: Address) -> Vec<String> {
+    Storage::get_subject_bundles(env, &subject)
 }

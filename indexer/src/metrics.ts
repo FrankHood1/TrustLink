@@ -66,6 +66,7 @@ export const EventTypes = {
   MULTISIG_ACTIVATED: "ms_actv",
   ADMIN_INIT: "adm_init",
   ADMIN_TRANSFER: "adm_xfer",
+  REQUEST_EXPIRED: "req_exp",
 } as const;
 
 export type EventType = (typeof EventTypes)[keyof typeof EventTypes];

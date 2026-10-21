@@ -72,7 +72,7 @@ pub fn fulfill_request(
     }
 
     match request.status {
-        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled => return Err(Error::RequestAlreadyProcessed),
+        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled | RequestStatus::Expired => return Err(Error::RequestAlreadyProcessed),
         RequestStatus::Pending => {}
     }
 
@@ -81,6 +81,7 @@ pub fn fulfill_request(
         return Err(Error::RequestExpired);
     }
 
+    crate::attestation::validate_new_attestation_common(env, &issuer, &request.subject, &request.claim_type)?;
     validate_native_expiration(env, expiration)?;
 
     let attestation_id = Attestation::generate_id(env, &issuer, &request.subject, &request.claim_type, current_time);
@@ -92,7 +93,7 @@ pub fn fulfill_request(
     if Storage::get_issuer_attestations(env, &issuer).len() >= limits.max_attestations_per_issuer {
         return Err(Error::LimitExceeded);
     }
-    if Storage::get_subject_attestations(env, &request.subject).len() >= limits.max_attestations_per_subject {
+    if crate::storage::ChunkedIndex::subject_count(env, &request.subject) >= limits.max_attestations_per_subject {
         return Err(Error::LimitExceeded);
     }
 
@@ -148,7 +149,9 @@ pub fn reject_request(
     }
 
     match request.status {
-        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled => return Err(Error::RequestAlreadyProcessed),
+        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled | RequestStatus::Expired => {
+            return Err(Error::RequestAlreadyProcessed)
+        }
         RequestStatus::Pending => {}
     }
 
@@ -178,7 +181,7 @@ pub fn cancel_request(env: &Env, subject: Address, request_id: String) -> Result
     }
 
     match request.status {
-        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled => {
+        RequestStatus::Fulfilled | RequestStatus::Rejected | RequestStatus::Cancelled | RequestStatus::Expired => {
             return Err(Error::RequestAlreadyProcessed)
         }
         RequestStatus::Pending => {}
@@ -221,5 +224,24 @@ pub fn get_pending_requests(env: &Env, issuer: Address, start: u32, limit: u32) 
 }
 
 pub fn get_request(env: &Env, request_id: String) -> Result<AttestationRequest, Error> {
-    Storage::get_request(env, &request_id)
+    let mut req = Storage::get_request(env, &request_id)?;
+    // Compute expiry lazily on read: a Pending request whose deadline has
+    // passed is surfaced as Expired without requiring cleanup to have run.
+    if req.status == RequestStatus::Pending && env.ledger().timestamp() >= req.expires_at {
+        req.status = RequestStatus::Expired;
+    }
+    Ok(req)
+}
+
+/// Remove expired pending requests from an issuer's pending list, persist
+/// `RequestStatus::Expired` on each expired record, and emit a `req_exp`
+/// event per expired request.
+///
+/// # Errors
+/// - [`Error::Unauthorized`] — caller is not a registered issuer.
+pub fn cleanup_expired_requests(env: &Env, issuer: Address) -> Result<(), Error> {
+    issuer.require_auth();
+    Validation::require_issuer(env, &issuer)?;
+    Storage::cleanup_expired_requests(env, &issuer);
+    Ok(())
 }

@@ -103,15 +103,32 @@ export function buildRestServer(db: PrismaClient): FastifyInstance {
 
   fastify.get<{ Params: { address: string; claim_type: string } }>(
     "/subjects/:address/claims/:claim_type/valid",
-    async (req) => {
+    async (req, reply) => {
+      // Get ledger time from latest checkpoint for consistency with on-chain behavior
+      const checkpoint = await db.checkpoint.findUnique({ where: { id: 1 } });
+      // Use ledger sequence as the time source (falls back to 0 if no checkpoint)
+      const ledgerTime = checkpoint?.ledger ?? 0;
+
       const attestation = await db.attestation.findFirst({
         where: {
           subject: req.params.address,
           claimType: req.params.claim_type,
           isRevoked: false,
+          // Filter out expired attestations: expiration IS NULL OR expiration > ledgerTime
+          OR: [
+            { expiration: null },
+            { expiration: { gt: ledgerTime } },
+          ],
+          // TODO: Add validFrom field to schema and index on (subject, claimType, isRevoked, expiration)
+          // When validFrom is added, add: OR: [{ validFrom: null }, { validFrom: { lte: ledgerTime } }]
         },
       });
-      return { valid: !!attestation };
+
+      if (!attestation) {
+        return { valid: false, attestationId: null };
+      }
+
+      return { valid: true, attestationId: attestation.id };
     },
   );
 

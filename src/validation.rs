@@ -188,6 +188,20 @@ impl Validation {
         Ok(())
     }
 
+    /// Validate optional description string for claim type.
+    ///
+    /// # Rules
+    /// - Maximum 256 bytes.
+    ///
+    /// # Errors
+    /// - [`Error::DescriptionTooLong`] — description exceeds 256 bytes.
+    pub fn validate_description(description: &String) -> Result<(), Error> {
+        if description.len() > 256 {
+            return Err(Error::DescriptionTooLong);
+        }
+        Ok(())
+    }
+
     /// Validate optional metadata string.
     ///
     /// # Rules
@@ -232,15 +246,21 @@ impl Validation {
         Ok(())
     }
 
-    /// Check if a claim type is registered when required by contract config.
+    /// Check if a claim type is registered and active when required by contract config.
     ///
     /// # Errors
     /// - [`Error::InvalidClaimType`] — claim type is not registered and contract requires registration.
+    /// - [`Error::ClaimTypeDeprecated`] — claim type is registered but has been deprecated.
     pub fn require_registered_claim_type(env: &Env, claim_type: &String) -> Result<(), Error> {
         if let Some(config) = Storage::get_contract_config(env) {
             if config.require_registered_claim_type {
                 if Storage::get_claim_type(env, claim_type).is_none() {
                     return Err(Error::InvalidClaimType);
+                }
+                // Check if the claim type is deprecated
+                let status = Storage::get_claim_type_status(env, claim_type);
+                if status == crate::types::ClaimTypeStatus::Deprecated {
+                    return Err(Error::ClaimTypeDeprecated);
                 }
             }
         }

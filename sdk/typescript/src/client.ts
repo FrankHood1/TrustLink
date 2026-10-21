@@ -808,33 +808,6 @@ export class TrustLinkClient {
   }
 
   /**
-   * Checks if a subject has a valid claim from issuers of at least a specified tier.
-   * @param subject - Stellar address of the subject.
-   * @param claimType - The claim type to check.
-   * @param minTier - Minimum issuer tier required.
-   * @returns True if the subject has a valid claim from the required tier, false otherwise.
-   * @throws {InvalidAddressError} If the address format is invalid.
-   * @throws {InvalidClaimTypeError} If the claim type format is invalid.
-   * @throws {NotInitializedError} If the contract has not been initialized.
-   * @throws {TrustLinkError} For other contract errors.
-   */
-  async hasValidClaimFromTier(
-    subject: string,
-    claimType: string,
-    minTier: IssuerTier
-  ): Promise<boolean> {
-    validateAddress(subject);
-    validateClaimType(claimType);
-    // IssuerTier is a Soroban #[contracttype] enum — encode as ScVec([ScSymbol(variant)])
-    return this.simulate(
-      "has_valid_claim_from_tier",
-      this.addr(subject),
-      this.str(claimType),
-      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(minTier)])
-    );
-  }
-
-  /**
    * Returns the total count of attestations for a claim type.
    * @param claimType - The claim type to count.
    * @returns Total count as a bigint.
@@ -852,40 +825,43 @@ export class TrustLinkClient {
   /**
    * Returns the total number of attestations for a subject.
    * @param subject - Stellar address of the subject.
-   * @returns Total count as a bigint.
+   * @returns Total count as a number (contract returns u32).
    * @throws {InvalidAddressError} If the address format is invalid.
    * @throws {NotInitializedError} If the contract has not been initialized.
    * @throws {TrustLinkError} For other contract errors.
    */
-  async getSubjectAttestationCount(subject: string): Promise<bigint> {
+  async getSubjectAttestationCount(subject: string): Promise<number> {
     validateAddress(subject);
-    return this.simulate("get_subject_attestation_count", this.addr(subject));
+    // Contract returns u32, which scValToNative decodes to a JavaScript number
+    return this.simulate<number>("get_subject_attestation_count", this.addr(subject));
   }
 
   /**
    * Returns the total number of attestations for an issuer.
    * @param issuer - Stellar address of the issuer.
-   * @returns Total count as a bigint.
+   * @returns Total count as a number (contract returns u32).
    * @throws {InvalidAddressError} If the address format is invalid.
    * @throws {NotInitializedError} If the contract has not been initialized.
    * @throws {TrustLinkError} For other contract errors.
    */
-  async getIssuerAttestationCount(issuer: string): Promise<bigint> {
+  async getIssuerAttestationCount(issuer: string): Promise<number> {
     validateAddress(issuer);
-    return this.simulate("get_issuer_attestation_count", this.addr(issuer));
+    // Contract returns u32, which scValToNative decodes to a JavaScript number
+    return this.simulate<number>("get_issuer_attestation_count", this.addr(issuer));
   }
 
   /**
    * Returns the total number of valid claims for a subject.
    * @param subject - Stellar address of the subject.
-   * @returns Total count as a bigint.
+   * @returns Total count as a number (contract returns u32).
    * @throws {InvalidAddressError} If the address format is invalid.
    * @throws {NotInitializedError} If the contract has not been initialized.
    * @throws {TrustLinkError} For other contract errors.
    */
-  async getValidClaimCount(subject: string): Promise<bigint> {
+  async getValidClaimCount(subject: string): Promise<number> {
     validateAddress(subject);
-    return this.simulate("get_valid_claim_count", this.addr(subject));
+    // Contract returns u32, which scValToNative decodes to a JavaScript number
+    return this.simulate<number>("get_valid_claim_count", this.addr(subject));
   }
 
   // ── Expiring Attestations (Issue #604) ───────────────────────────────────────
@@ -1152,20 +1128,6 @@ export class TrustLinkClient {
   // ── Endorsements ──────────────────────────────────────────────────────────
 
   /**
-   * Returns endorsements for an attestation.
-   * @param attestationId - The attestation ID.
-   * @returns Array of endorsement objects.
-   * @throws {TrustLinkValidationError} If the attestation ID is invalid.
-   * @throws {NotInitializedError} If the contract has not been initialized.
-   * @throws {NotFoundError} If the attestation is not found.
-   * @throws {TrustLinkError} For other contract errors.
-   */
-  async getEndorsements(attestationId: string): Promise<Endorsement[]> {
-    validateAttestationId(attestationId);
-    return this.simulate("get_endorsements", this.str(attestationId));
-  }
-
-  /**
    * Returns the number of endorsements for an attestation.
    * @param attestationId - The attestation ID.
    * @returns Endorsement count.
@@ -1365,10 +1327,11 @@ export class TrustLinkClient {
 
     const attestationData = await Promise.all(
       attestations.map(async (att) => {
-        const [auditLog, endorsements] = await Promise.all([
-          this.getAuditLog(att.id),
-          this.getEndorsements(att.id),
-        ]);
+        const auditLog = await this.getAuditLog(att.id);
+        // Note: getEndorsements() is not available in the contract.
+        // Only get_endorsement_count and list_endorsements_by_endorser are exported.
+        // To get endorsements, use listEndorsementsByEndorser() with each known endorser.
+        const endorsements: Endorsement[] = [];
         return { attestation: att, auditLog, endorsements };
       })
     );

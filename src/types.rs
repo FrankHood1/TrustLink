@@ -27,6 +27,11 @@ pub enum RequestStatus {
     Fulfilled = 1,
     Rejected = 2,
     Cancelled = 3,
+    /// The request's `expires_at` timestamp has passed without the issuer
+    /// fulfilling or rejecting it. This variant is never stored on-chain;
+    /// it is computed on read inside [`crate::request::get_request`] and
+    /// persisted by [`crate::storage::Storage::cleanup_expired_requests`].
+    Expired = 4,
 }
 
 /// A pull-based attestation request submitted by a subject to a registered issuer.
@@ -203,6 +208,14 @@ pub struct ContractConfig {
     /// **Should only be changed before any attestations are written**; changing
     /// it afterwards requires a full index migration.
     pub chunk_size: u32,
+}
+
+/// Status of a registered claim type.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClaimTypeStatus {
+    Active = 0,
+    Deprecated = 1,
 }
 
 #[contracttype]
@@ -436,6 +449,54 @@ pub struct AttestationTemplate {
     pub default_expiration_days: Option<u32>,
 }
 
+/// Revocation list export format following the Status List 2021 standard pattern.
+/// Returns a compact bitstring representation of revoked attestations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevocationList {
+    /// The issuer that created this revocation list
+    pub issuer: Address,
+    /// The claim type these revocations apply to (None = all claim types)
+    pub claim_type: Option<String>,
+    /// Unix timestamp when this list was generated
+    pub generated_at: u64,
+    /// List of revoked attestation IDs
+    pub revoked_attestation_ids: Vec<String>,
+    /// Optional: bitstring encoding for compact representation
+    /// When provided, each bit represents whether the attestation at that
+    /// position in the sorted list is revoked (1) or not (0)
+    pub bitstring: Option<Vec<u8>>,
+    /// Total count of attestations (valid + revoked) at the time of export
+    pub total_attestation_count: u64,
+    /// Count of revoked attestations in this list
+    pub revoked_count: u64,
+}
+
+/// Export format selector for revocation lists
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RevocationListFormat {
+    /// Simple list of revoked attestation IDs
+    SimpleList = 0,
+    /// Compact bitstring encoding (Status List 2021 compatible)
+    Bitstring = 1,
+}
+
+/// A bundle of attestations created by an issuer for a group of subjects.
+/// Each attestation in a bundle must be valid (not revoked, not deleted, not expired).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationBundle {
+    pub id: String,
+    pub issuer: Address,
+    pub claim_type: String,
+    pub attestation_ids: Vec<String>,
+    pub created_at: u64,
+    /// Cached validation status: true if all members are valid at creation time.
+    /// Queries should recompute this by checking expiration of each attestation.
+    pub all_valid: bool,
+}
+
 impl Attestation {
     pub fn hash_payload(env: &Env, payload: &Bytes) -> String {
         let hash = env.crypto().sha256(payload).to_array();
@@ -547,6 +608,22 @@ impl Attestation {
             }
         }
         AttestationStatus::Valid
+    }
+}
+
+impl AttestationBundle {
+    pub fn generate_id(
+        env: &Env,
+        issuer: &Address,
+        claim_type: &String,
+        timestamp: u64,
+    ) -> String {
+        let mut payload = Bytes::new(env);
+        payload.append(&Bytes::from_slice(env, b"bundle:"));
+        payload.append(&issuer.clone().to_xdr(env));
+        payload.append(&claim_type.clone().to_xdr(env));
+        payload.append(&timestamp.to_xdr(env));
+        Attestation::hash_payload(env, &payload)
     }
 }
 

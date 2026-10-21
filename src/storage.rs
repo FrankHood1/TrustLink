@@ -2,8 +2,11 @@
 //!
 //! Single point of contact between contract logic and on-chain storage.
 
-use crate::constants::{DAY_IN_LEDGERS, DEFAULT_INSTANCE_LIFETIME};
+use crate::constants::{DAY_IN_LEDGERS, DEFAULT_INSTANCE_LIFETIME, MAX_AUDIT_LOG_ENTRIES, MAX_VERSION_HISTORY};
 use crate::types::{
+    Attestation, AttestationBundle, AttestationRequest, AuditEntry, ClaimTypeInfo, Endorsement, Error, ExpirationHook,
+    FeeConfig, GlobalStats, IssuerMetadata, IssuerStats, IssuerTier, MultiSigProposal,
+    RateLimitConfig, StorageLimits, TtlConfig,
     AdminCouncil, Attestation, AttestationRequest, AttestationTemplate, AttestationVersionSnapshot,
     AuditEntry, ClaimTypeConstraints, ClaimTypeInfo, CouncilProposal, DecayConfig, Delegation,
     DisputeRecord, Endorsement, Error, ExpirationHook, FeeConfig, GlobalStats, IssuerMetadata,
@@ -67,6 +70,10 @@ pub enum StorageKey {
     Paused,
     /// Ordered list of proposal IDs for a subject (for list_open_proposals).
     ProposalIndex(Address),
+    /// Configurable TTL in days for multisig proposals (default: 7).
+    MultisigTtl,
+    /// Attestation bundle keyed by bundle ID.
+    Bundle(String),
     /// Last attestation issuance timestamp per issuer (across all claim types).
     LastIssuanceTime(Address),
     /// Bundle of infrequently-changed, contract-wide singleton settings
@@ -279,16 +286,17 @@ impl Storage {
         let key = StorageKey::Issuer(issuer.clone());
         let ttl = get_ttl_lifetime(env);
         env.storage().persistent().set(&key, &true);
-        env.storage().persistent().extend_ttl(&key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
-        
+        env.storage().persistent().extend_ttl(&key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
+
         // Initialize issuer metadata with Basic tier
-        let metadata = IssuerMetadata {
-            address: issuer.clone(),
-            tier: IssuerTier::Basic,
+        let metadata = crate::types::IssuerMetadata {
+            name: String::from_str(env, ""),
+            url: String::from_str(env, ""),
+            description: String::from_str(env, ""),
         };
         let metadata_key = StorageKey::IssuerMetadata(issuer.clone());
         env.storage().persistent().set(&metadata_key, &metadata);
-        env.storage().persistent().extend_ttl(&metadata_key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
+        env.storage().persistent().extend_ttl(&metadata_key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
         // Maintain ordered IssuerList
         let mut list = Self::get_issuer_list(env);
@@ -321,27 +329,15 @@ impl Storage {
         if !Self::is_issuer(env, issuer) {
             return Err(Error::NotFound);
         }
-        
+
+        let key = StorageKey::IssuerMetadata(issuer.clone());
         let mut metadata = Self::get_issuer_metadata(env, issuer)?;
         metadata.tier = tier;
-        
-        let key = StorageKey::IssuerMetadata(issuer.clone());
+
         env.storage().persistent().set(&key, &metadata);
-        env.storage().persistent().extend_ttl(&key, INSTANCE_LIFETIME, INSTANCE_LIFETIME);
-        
+        env.storage().persistent().extend_ttl(&key, DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
+
         Ok(())
-        // Remove from IssuerList
-        let existing = Self::get_issuer_list(env);
-        let mut updated = Vec::new(env);
-        for addr in existing.iter() {
-            if &addr != issuer {
-                updated.push_back(addr);
-            }
-        }
-        let list_key = StorageKey::IssuerList;
-        let ttl = get_ttl_lifetime(env);
-        env.storage().persistent().set(&list_key, &updated);
-        env.storage().persistent().extend_ttl(&list_key, ttl, ttl);
     }
 
     pub fn get_issuer_list(env: &Env) -> Vec<Address> {
@@ -486,6 +482,28 @@ impl Storage {
         env.storage().persistent().get(&StorageKey::ClaimType(claim_type.clone()))
     }
 
+    pub fn get_claim_type_status(env: &Env, claim_type: &String) -> crate::types::ClaimTypeStatus {
+        // Use a composite key by appending "_status" to avoid conflicts
+        let status_key = {
+            let mut key = claim_type.clone();
+            key.push_str("_status");
+            key
+        };
+        env.storage().instance().get(&StorageKey::ClaimType(status_key))
+            .unwrap_or(crate::types::ClaimTypeStatus::Active)
+    }
+
+    pub fn set_claim_type_status(env: &Env, claim_type: &String, status: crate::types::ClaimTypeStatus) {
+        // Use a composite key by appending "_status" to avoid conflicts
+        let status_key = {
+            let mut key = claim_type.clone();
+            key.push_str("_status");
+            key
+        };
+        env.storage().instance().set(&StorageKey::ClaimType(status_key), &status);
+        env.storage().instance().extend_ttl(DEFAULT_INSTANCE_LIFETIME, DEFAULT_INSTANCE_LIFETIME);
+    }
+
     pub fn get_claim_type_list(env: &Env) -> Vec<String> {
         env.storage().persistent().get(&StorageKey::ClaimTypeList).unwrap_or(Vec::new(env))
     }
@@ -500,6 +518,10 @@ impl Storage {
 
     pub fn get_claim_type_constraints(env: &Env, claim_type: &String) -> Option<crate::types::ClaimTypeConstraints> {
         env.storage().persistent().get(&StorageKey::ClaimTypeConstraints(claim_type.clone()))
+    }
+
+    pub fn remove_claim_type_constraints(env: &Env, claim_type: &String) {
+        env.storage().persistent().remove(&StorageKey::ClaimTypeConstraints(claim_type.clone()));
     }
 
     pub fn set_whitelist_mode(env: &Env, issuer: &Address, enabled: bool) {
@@ -701,6 +723,18 @@ impl Storage {
         let key = StorageKey::AuditLog(attestation_id.clone());
         let ttl = get_ttl_lifetime(env);
         let mut log = Self::get_audit_log(env, attestation_id);
+        // Cap the log at MAX_AUDIT_LOG_ENTRIES to prevent unbounded growth that
+        // would eventually make the entry too large to revoke (issue #1549).
+        if log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let drop = log.len() - MAX_AUDIT_LOG_ENTRIES + 1;
+            let mut trimmed = Vec::new(env);
+            for i in drop..log.len() {
+                if let Some(e) = log.get(i) {
+                    trimmed.push_back(e);
+                }
+            }
+            log = trimmed;
+        }
         log.push_back(entry.clone());
         env.storage().persistent().set(&key, &log);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
@@ -874,9 +908,23 @@ impl Storage {
         let existing = Self::get_pending_request_ids(env, issuer);
         let mut updated = Vec::new(env);
         for id in existing.iter() {
-            if let Ok(req) = Self::get_request(env, &id) {
+            if let Ok(mut req) = Self::get_request(env, &id) {
                 if current_time < req.expires_at {
                     updated.push_back(id);
+                } else {
+                    // Persist the Expired status so that get_request returns
+                    // RequestStatus::Expired rather than the stale Pending value.
+                    req.status = crate::types::RequestStatus::Expired;
+                    let req_key = StorageKey::AttestationRequest(req.id.clone());
+                    env.storage().persistent().set(&req_key, &req);
+                    env.storage().persistent().extend_ttl(&req_key, ttl, ttl);
+                    crate::events::Events::request_expired(
+                        env,
+                        &req.id,
+                        issuer,
+                        &req.subject,
+                        req.expires_at,
+                    );
                 }
             }
         }
@@ -1044,6 +1092,18 @@ impl Storage {
         let key = StorageKey::AttestationHistory(attestation_id.clone());
         let ttl = get_ttl_lifetime(env);
         let mut history = Self::get_attestation_history(env, attestation_id);
+        // Cap the history at MAX_VERSION_HISTORY to prevent unbounded growth that
+        // would eventually make the entry too large to revoke (issue #1549).
+        if history.len() >= MAX_VERSION_HISTORY {
+            let drop = history.len() - MAX_VERSION_HISTORY + 1;
+            let mut trimmed = Vec::new(env);
+            for i in drop..history.len() {
+                if let Some(s) = history.get(i) {
+                    trimmed.push_back(s);
+                }
+            }
+            history = trimmed;
+        }
         history.push_back(snapshot.clone());
         env.storage().persistent().set(&key, &history);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
@@ -1312,7 +1372,8 @@ pub fn paginate(env: &Env, list: &Vec<String>, start: u32, limit: u32) -> Vec<St
     if start >= len {
         return result;
     }
-    let end = (start + limit).min(len);
+    // Use saturating_add to prevent overflow when limit is very large (e.g. u32::MAX).
+    let end = start.saturating_add(limit).min(len);
     for i in start..end {
         if let Some(item) = list.get(i) {
             result.push_back(item);
@@ -1327,7 +1388,8 @@ pub fn paginate_addresses(env: &Env, list: &Vec<Address>, start: u32, limit: u32
     if start >= len {
         return result;
     }
-    let end = (start + limit).min(len);
+    // Use saturating_add to prevent overflow when limit is very large (e.g. u32::MAX).
+    let end = start.saturating_add(limit).min(len);
     for i in start..end {
         if let Some(item) = list.get(i) {
             result.push_back(item);
@@ -1554,5 +1616,26 @@ impl ChunkedIndex {
 
     pub fn get_issuer_all(env: &Env, issuer: &Address) -> Vec<String> {
         Self::get_issuer_ids(env, issuer)
+    }
+}
+
+    // -----------------------------------------------------------------------
+    // Bundle operations
+    // -----------------------------------------------------------------------
+
+    pub fn set_bundle(env: &Env, bundle: &AttestationBundle) {
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Bundle(bundle.id.clone()), bundle);
+        env.storage()
+            .persistent()
+            .extend_ttl(&StorageKey::Bundle(bundle.id.clone()), get_ttl_lifetime(env), get_ttl_lifetime(env));
+    }
+
+    pub fn get_bundle(env: &Env, bundle_id: &String) -> Result<AttestationBundle, Error> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Bundle(bundle_id.clone()))
+            .ok_or(Error::NotFound)
     }
 }
