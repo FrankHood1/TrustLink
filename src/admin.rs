@@ -611,9 +611,29 @@ pub fn register_claim_type(env: &Env, admin: Address, claim_type: String, descri
     admin.require_auth();
     Validation::require_admin(env, &admin)?;
     Validation::validate_claim_type(&claim_type)?;
-    let info = ClaimTypeInfo { claim_type: claim_type.clone(), description: description.clone() };
+    Validation::validate_description(&description)?;
+    let info = ClaimTypeInfo {
+        claim_type: claim_type.clone(),
+        description: description.clone(),
+    };
     Storage::set_claim_type(env, &info);
+    // Initialize status to Active
+    Storage::set_claim_type_status(env, &claim_type, crate::types::ClaimTypeStatus::Active);
     Events::claim_type_registered(env, &claim_type, &description);
+    Ok(())
+}
+
+pub fn set_claim_type_status(env: &Env, admin: Address, claim_type: String, status: crate::types::ClaimTypeStatus) -> Result<(), Error> {
+    admin.require_auth();
+    Validation::require_admin(env, &admin)?;
+    Validation::validate_claim_type(&claim_type)?;
+
+    // Verify that the claim type is registered
+    Storage::get_claim_type(env, &claim_type)
+        .ok_or(Error::InvalidClaimType)?;
+
+    Storage::set_claim_type_status(env, &claim_type, status);
+    Events::claim_type_status_changed(env, &claim_type, status);
     Ok(())
 }
 

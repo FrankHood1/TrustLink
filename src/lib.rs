@@ -32,6 +32,17 @@ pub(crate) mod callback {
 }
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use types::{Attestation, AttestationStatus, Error, IssuerTier};
+use storage::Storage;
+use events::Events;
+
+/// The TrustLink smart contract.
+///
+/// Provides a shared attestation infrastructure: admins manage a registry of
+/// trusted issuers, issuers create and revoke attestations, and any caller can
+/// verify claims against the registry.
+use crate::types::{
+    AdminCouncil, AttestationBundle, AttestationRequest, AttestationStatus,
 use crate::types::{
     AdminCouncil, Attestation, AttestationBundle, AttestationRequest, AttestationStatus,
     AttestationTemplate, AttestationVersionSnapshot, AuditEntry, ClaimTypeConstraints,
@@ -40,6 +51,7 @@ use crate::types::{
     GlobalStats, HealthStatus, IssuerMetadata, IssuerStats, IssuerTier, MultiSigProposal,
     PendingAdminTransfer, RateLimitConfig, RequestStatus, RevocationList, RevocationListFormat,
     StorageLimits, TtlConfig,
+    ATTESTATION_REQUEST_TTL_SECS, MULTISIG_PROPOSAL_TTL_SECS, SECS_PER_DAY,
 };
 
 /// The TrustLink smart contract.
@@ -123,12 +135,7 @@ impl TrustLinkContract {
     }
 
     pub fn set_issuer_tier(env: Env, admin: Address, issuer: Address, tier: IssuerTier) -> Result<(), Error> {
-        admin.require_auth();
-        Validation::require_admin(&env, &admin)?;
-
-        Storage::set_issuer_tier(&env, &issuer, tier.clone())?;
-        Events::issuer_tier_updated(&env, &issuer, &tier);
-        Ok(())
+        admin::set_issuer_tier(&env, admin, issuer, tier)
     }
 
     /// Create a new attestation about a subject address.
@@ -371,6 +378,10 @@ impl TrustLinkContract {
 
     pub fn register_claim_type(env: Env, admin: Address, claim_type: String, description: String) -> Result<(), Error> {
         admin::register_claim_type(&env, admin, claim_type, description)
+    }
+
+    pub fn set_claim_type_status(env: Env, admin: Address, claim_type: String, status: types::ClaimTypeStatus) -> Result<(), Error> {
+        admin::set_claim_type_status(&env, admin, claim_type, status)
     }
 
     #[must_use]
@@ -1004,5 +1015,172 @@ impl TrustLinkContract {
     #[must_use]
     pub fn get_council_timelock_delay(env: Env) -> u64 {
         admin::get_council_timelock_delay(&env)
+    }
+
+    // -----------------------------------------------------------------------
+    // Attestation Templates
+    // -----------------------------------------------------------------------
+
+    /// Create or overwrite a named attestation template for the calling issuer.
+    ///
+    /// Templates capture default values for `claim_type`, optional expiration
+    /// window, and optional metadata. They can be instantiated later via
+    /// [`create_attestation_from_template`].
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] — `issuer` is not a registered issuer.
+    /// - [`Error::InvalidClaimType`] — `claim_type` is empty or invalid.
+    /// - [`Error::MetadataTooLong`] — `metadata_template` exceeds 256 bytes.
+    pub fn create_template(
+        env: Env,
+        issuer: Address,
+        template_id: String,
+        template: AttestationTemplate,
+    ) -> Result<(), Error> {
+        issuer.require_auth();
+        Validation::require_issuer(&env, &issuer)?;
+        Validation::validate_claim_type(&template.claim_type)?;
+        Validation::validate_metadata(&env, &template.metadata_template)?;
+
+        Storage::set_template(&env, &issuer, &template_id, &template);
+        Storage::add_to_template_registry(&env, &issuer, &template_id);
+        Ok(())
+    }
+
+    pub fn get_contract_metadata(env: Env) -> Result<ContractMetadata, Error> {
+        let version = Storage::get_version(&env).ok_or(Error::NotInitialized)?;
+        Ok(ContractMetadata {
+            name: String::from_str(&env, "TrustLink"),
+            version,
+            description: String::from_str(
+                &env,
+                "On-chain attestation and verification system for the Stellar blockchain.",
+            ),
+        })
+    }
+
+    pub fn get_config(env: Env) -> ContractConfig {
+        // Try to get the stored config, or build one with defaults
+        if let Some(config) = Storage::get_contract_config(&env) {
+            config
+        } else {
+            // Provide defaults for backward compatibility
+            ContractConfig {
+                contract_name: String::from_str(&env, "TrustLink"),
+                contract_version: String::from_str(&env, ""),
+                contract_description: String::from_str(
+                    &env,
+                    "On-chain attestation and verification system for the Stellar blockchain.",
+                ),
+                ttl_config: Storage::get_ttl_config(&env).unwrap_or(TtlConfig { ttl_days: 30 }),
+                fee_config: Storage::get_fee_config(&env).unwrap_or_else(|| FeeConfig {
+                    attestation_fee: 0,
+                    fee_collector: env.current_contract_address(),
+                    fee_token: None,
+                }),
+                require_registered_claim_type: false,
+                metadata_hash_only: false,
+                max_attestations_per_subject: None,
+                chunk_size: admin::get_chunk_size(&env),
+            }
+        }
+    }
+
+    /// Instantiate an attestation from a template, with optional field overrides.
+    ///
+    /// Loads the template for `(issuer, template_id)`, resolves the final
+    /// expiration and metadata (override wins over template default), then
+    /// creates and stores the attestation using the same logic as
+    /// [`create_attestation`].
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`] — `issuer` is not a registered issuer.
+    /// - [`Error::NotFound`] — `template_id` does not exist for this issuer.
+    /// - [`Error::MetadataTooLong`] — `metadata_override` exceeds 256 bytes.
+    /// - [`Error::InvalidExpiration`] — `expiration_override` ≤ current ledger timestamp.
+    pub fn create_attestation_from_template(
+        env: Env,
+        issuer: Address,
+        template_id: String,
+        subject: Address,
+        expiration_override: Option<u64>,
+        metadata_override: Option<String>,
+    ) -> Result<String, Error> {
+        Validation::require_issuer(&env, &issuer)?;
+
+        let template = Storage::get_template(&env, &issuer, &template_id)
+            .ok_or(Error::NotFound)?;
+
+        // Validate overrides before resolving.
+        Validation::validate_metadata(&env, &metadata_override)?;
+
+        let current_time = env.ledger().timestamp();
+        if let Some(ts) = expiration_override {
+            if ts <= current_time {
+                return Err(Error::InvalidExpiration);
+            }
+        }
+
+        // Resolve final expiration: override > template default > None.
+        let expiration = if let Some(ts) = expiration_override {
+            Some(ts)
+        } else if let Some(days) = template.default_expiration_days {
+            Some(current_time + (days as u64) * crate::constants::SECS_PER_DAY)
+        } else {
+            None
+        };
+
+        // Resolve final metadata: override > template default.
+        let metadata = if metadata_override.is_some() {
+            metadata_override
+        } else {
+            template.metadata_template.clone()
+        };
+
+        // Delegate to the shared internal creation path.
+        attestation::create_attestation_internal(
+            &env,
+            issuer,
+            subject,
+            template.claim_type.clone(),
+            expiration,
+            metadata,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Return the ordered list of template IDs registered for `issuer`.
+    ///
+    /// Returns an empty `Vec` if the issuer has no templates. IDs are in
+    /// insertion order (first-created first).
+    #[must_use]
+    pub fn list_templates(env: Env, issuer: Address) -> Vec<String> {
+        Storage::get_template_registry(&env, &issuer)
+    }
+
+    /// Retrieve a single template by issuer and template ID.
+    ///
+    /// # Errors
+    /// - [`Error::NotFound`] — `template_id` does not exist for this issuer.
+    pub fn get_template(
+        env: Env,
+        issuer: Address,
+        template_id: String,
+    ) -> Result<AttestationTemplate, Error> {
+        Storage::get_template(&env, &issuer, &template_id).ok_or(Error::NotFound)
+    }
+
+    pub fn is_bundle_valid(env: Env, bundle_id: String) -> Result<bool, Error> {
+        bundle::is_bundle_valid(&env, &bundle_id)
+    }
+
+    pub fn get_issuer_bundles(env: Env, issuer: Address) -> Vec<String> {
+        Storage::get_issuer_bundles(&env, &issuer)
+    }
+
+    pub fn get_subject_bundles(env: Env, subject: Address) -> Vec<String> {
+        Storage::get_subject_bundles(&env, &subject)
     }
 }

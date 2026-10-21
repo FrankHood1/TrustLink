@@ -94,7 +94,8 @@ pub enum Error {
     NotImplemented = 48,
     /// Invalid configuration value (e.g., min > max for constraints).
     InvalidConfigValue = 49,
-    /// An input list contains the same entry more than once (e.g. a repeated
-    /// claim type in `create_attestation_bundle`).
-    DuplicateInput = 50,
+    /// Description exceeds maximum length of 256 bytes.
+    DescriptionTooLong = 50,
+    /// Claim type is deprecated and cannot be used for new attestations.
+    ClaimTypeDeprecated = 51,
 }
