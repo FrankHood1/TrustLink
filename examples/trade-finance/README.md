@@ -38,16 +38,17 @@ pub fn issue_trade_credit(
     financial_institution: Address,
     trustlink_id: Address,
     amount: i128,
-) -> Result<bool, String>
+) -> Result<bool, TradeFinanceError>
 ```
 
 **Parameters:**
+
 - `merchant`: The merchant address seeking trade credit (must have `MERCHANT_VERIFIED` attestation)
 - `financial_institution`: The financial institution address providing credit (must have `FINANCIAL_INSTITUTION_LICENSED` attestation)
 - `trustlink_id`: The contract ID of the deployed TrustLink instance
 - `amount`: The amount of trade credit to issue
 
-**Returns:** `true` if trade credit issuance is successful
+**Returns:** `Ok(true)` when issuance is authorized; otherwise returns a `TradeFinanceError` for an invalid amount, missing merchant verification, or missing financial-institution licensing. TrustLink's claim queries only accept valid, non-revoked, non-expired attestations.
 
 ## Example Usage
 
