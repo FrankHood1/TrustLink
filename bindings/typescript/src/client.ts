@@ -325,7 +325,7 @@ export class TrustLinkClient {
 
   /** Update the trust tier of a registered issuer. Admin only. */
   async updateIssuerTier(admin: Keypair, issuer: string, tier: IssuerTier): Promise<string> {
-    return this.invoke("update_issuer_tier", [
+    return this.invoke("set_issuer_tier", [
       addr(admin.publicKey()),
       addr(issuer),
       nativeToScVal(tier, { type: "u32" }),
@@ -589,17 +589,6 @@ export class TrustLinkClient {
     return this.simulate("has_valid_claim_from_issuer", [addr(subject), str(claimType), addr(issuer)]) as Promise<boolean>;
   }
 
-  /** Return true if the subject holds a valid attestation of the given claim type from an issuer at or above min_tier. */
-  async hasValidClaimFromTier(subject: string, claimType: string, minTier: IssuerTier): Promise<boolean> {
-    validateAddress(subject);
-    validateClaimType(claimType);
-    return this.simulate("has_valid_claim_from_tier", [
-      addr(subject),
-      str(claimType),
-      nativeToScVal(minTier, { type: "u32" }),
-    ]) as Promise<boolean>;
-  }
-
   /** Return true if the subject holds a valid attestation for ANY of the given claim types (OR logic). */
   async hasAnyClaim(subject: string, claimTypes: string[]): Promise<boolean> {
     validateAddress(subject);
@@ -702,12 +691,6 @@ export class TrustLinkClient {
   async endorseAttestation(endorser: Keypair, attestationId: string): Promise<string> {
     validateAttestationId(attestationId);
     return this.invoke("endorse_attestation", [addr(endorser.publicKey()), str(attestationId)], endorser);
-  }
-
-  /** Return all endorsements for an attestation. */
-  async getEndorsements(attestationId: string): Promise<Endorsement[]> {
-    validateAttestationId(attestationId);
-    return this.simulate("get_endorsements", [str(attestationId)]) as Promise<Endorsement[]>;
   }
 
   /** Return the number of endorsements for an attestation. */
