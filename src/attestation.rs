@@ -4,8 +4,8 @@ use crate::constants::SECS_PER_DAY;
 use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{
-    Attestation, AttestationOrigin, AttestationVersionSnapshot, AuditAction, AuditEntry,
-    Endorsement, Error, FeeConfig,
+    Attestation, AttestationOrigin, AttestationStatus, AttestationVersionSnapshot, AuditAction,
+    AuditEntry, Endorsement, Error, FeeConfig,
 };
 use crate::validation::Validation;
 
@@ -996,15 +996,32 @@ pub fn amend_attestation(
 
 pub fn endorse_attestation(env: &Env, endorser: Address, attestation_id: String) -> Result<(), Error> {
     endorser.require_auth();
-    Validation::require_issuer(env, &endorser)?;
     Validation::require_not_paused(env)?;
+    Validation::require_issuer(env, &endorser)?;
 
     let attestation = Storage::get_attestation(env, &attestation_id)?;
+
+    // Reject self-endorsement by the issuer
     if attestation.issuer == endorser {
         return Err(Error::CannotEndorseOwn);
     }
+
+    // Reject self-endorsement by the subject
+    if attestation.subject == endorser {
+        return Err(Error::CannotEndorseOwn);
+    }
+
     if attestation.revoked {
         return Err(Error::AlreadyRevoked);
+    }
+
+    // Reject expired, pending (valid_from in the future), or GDPR-deleted attestations
+    let now = env.ledger().timestamp();
+    if attestation.get_status(now) != AttestationStatus::Valid {
+        return Err(Error::AttestationNotValid);
+    }
+    if attestation.deleted {
+        return Err(Error::AttestationNotValid);
     }
 
     let existing = Storage::get_endorsements(env, &attestation_id);
@@ -1014,12 +1031,17 @@ pub fn endorse_attestation(env: &Env, endorser: Address, attestation_id: String)
         }
     }
 
+    let timestamp = env.ledger().timestamp();
     let endorsement = Endorsement {
         attestation_id: attestation_id.clone(),
         endorser: endorser.clone(),
-        timestamp: env.ledger().timestamp(),
+        timestamp,
     };
     Storage::add_endorsement(env, &attestation_id, &endorsement);
+
+    // Emit event for indexer and reputation dashboards
+    Events::attestation_endorsed(env, &attestation_id, &endorser, timestamp);
+
     Ok(())
 }
 

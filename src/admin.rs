@@ -1030,9 +1030,12 @@ fn validate_fee_config(env: &Env, fee: i128, fee_token: &Option<Address>) -> Res
     }
     if let Some(token_addr) = fee_token {
         let token = TokenClient::new(env, token_addr);
-        token
-            .try_balance(&env.current_contract_address())
-            .map_err(|_| Error::InvalidFeeToken)?;
+        // try_balance returns Result<Result<i128, Error>, Error> where the outer Result
+        // covers host errors and the inner Result covers token-specific errors (e.g., not a SEP-41 token).
+        match token.try_balance(&env.current_contract_address()) {
+            Ok(Ok(_)) => {}
+            _ => return Err(Error::InvalidFeeToken),
+        }
     }
     Ok(())
 }
