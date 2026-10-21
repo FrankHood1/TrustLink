@@ -3,7 +3,7 @@ use soroban_sdk::{token::TokenClient, Address, Env, String, Vec};
 use crate::events::Events;
 use crate::storage::Storage;
 use crate::types::{
-    AdminCouncil, ClaimTypeInfo, ContractConfig, CouncilOperation, CouncilProposal, DecayConfig,
+    AdminCouncil, AttestationStatus, ClaimTypeInfo, ContractConfig, CouncilOperation, CouncilProposal, DecayConfig,
     Delegation, DisputeRecord, Error, ExpirationHook, FeeConfig, IssuerMetadata, IssuerStats,
     IssuerTier, PendingAdminTransfer, RateLimitConfig, StorageLimits, TtlConfig,
 };
@@ -196,6 +196,13 @@ pub fn get_confidence_score(env: &Env, attestation_id: String) -> Option<u32> {
     use crate::constants::SECS_PER_DAY;
 
     let attestation = Storage::get_attestation(env, &attestation_id).ok()?;
+    // Only currently valid attestations are scored. Deleted ones return None so
+    // the score does not reveal that they exist.
+    if attestation.deleted
+        || !matches!(attestation.get_status(env.ledger().timestamp()), AttestationStatus::Valid)
+    {
+        return None;
+    }
     let tier_score = match Storage::get_issuer_tier(env, &attestation.issuer) {
         Some(IssuerTier::Premium) => 90u32,
         Some(IssuerTier::Verified) => 60u32,
@@ -691,11 +698,20 @@ pub fn delegate_claim_type(
     expiration: Option<u64>,
 ) -> Result<(), Error> {
     issuer.require_auth();
+    Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
+    Validation::validate_claim_type(&claim_type)?;
+    Validation::require_registered_claim_type(env, &claim_type)?;
     if issuer == delegate {
         return Err(Error::CannotDelegateToSelf);
     }
+    // Bridges and admins already hold privileged roles; they must not also
+    // act as sub-issuers.
+    if Storage::is_bridge(env, &delegate) || Storage::is_admin(env, &delegate) {
+        return Err(Error::Unauthorized);
+    }
     crate::attestation::validate_native_expiration(env, expiration)?;
+    let is_update = Storage::get_delegation(env, &issuer, &delegate, &claim_type).is_some();
     let delegation = Delegation {
         delegator: issuer.clone(),
         delegate: delegate.clone(),
@@ -703,7 +719,11 @@ pub fn delegate_claim_type(
         expiration,
     };
     Storage::set_delegation(env, &delegation);
-    Events::delegation_created(env, &issuer, &delegate, &claim_type, expiration);
+    if is_update {
+        Events::delegation_updated(env, &issuer, &delegate, &claim_type, expiration);
+    } else {
+        Events::delegation_created(env, &issuer, &delegate, &claim_type, expiration);
+    }
     Ok(())
 }
 

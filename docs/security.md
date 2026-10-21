@@ -526,8 +526,11 @@ acceptable score based on the sensitivity of the gated action.
   endorsements arrive.
 - The score reflects the **issuer's reputation and peer endorsements**, not the
   veracity of the claim content.
-- `get_confidence_score` returns `None` for non-existent attestations. Integrators
-  must handle `None` as "no score available" rather than "score is zero".
+- `get_confidence_score` returns `None` for non-existent attestations and for
+  any attestation that is not currently `Valid`: revoked, expired, pending
+  (`valid_from` in the future) or GDPR-deleted. Deleted attestations return
+  `None` rather than a score so the call does not confirm they exist.
+  Integrators must handle `None` as "no score available" rather than "score is zero".
 
 ---
 

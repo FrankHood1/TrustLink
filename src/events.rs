@@ -395,6 +395,20 @@ impl Events {
         );
     }
 
+    /// Emitted when issuer overwrites an existing delegation (e.g. to change its expiration).
+    pub fn delegation_updated(
+        env: &Env,
+        delegator: &Address,
+        delegate: &Address,
+        claim_type: &String,
+        expiration: Option<u64>,
+    ) {
+        env.events().publish(
+            (symbol_short!("del_upd"), delegator.clone()),
+            (delegate.clone(), claim_type.clone(), expiration),
+        );
+    }
+
     pub fn delegation_revoked(
         env: &Env,
         delegator: &Address,
