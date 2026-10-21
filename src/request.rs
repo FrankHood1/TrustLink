@@ -92,7 +92,7 @@ pub fn fulfill_request(
     if Storage::get_issuer_attestations(env, &issuer).len() >= limits.max_attestations_per_issuer {
         return Err(Error::LimitExceeded);
     }
-    if Storage::get_subject_attestations(env, &request.subject).len() >= limits.max_attestations_per_subject {
+    if crate::storage::ChunkedIndex::subject_count(env, &request.subject) >= limits.max_attestations_per_subject {
         return Err(Error::LimitExceeded);
     }
 

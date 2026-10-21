@@ -108,7 +108,7 @@ pub fn create_attestation_bundle(
 
     let limits = Storage::get_limits(env);
     let issuer_count = Storage::get_issuer_attestations(env, &issuer).len();
-    let subject_count = Storage::get_subject_attestations(env, &subject).len();
+    let subject_count = crate::storage::ChunkedIndex::subject_count(env, &subject);
 
     // Verify storage limits can accommodate entire bundle
     if issuer_count.saturating_add(claim_types.len()) > limits.max_attestations_per_issuer {
@@ -172,15 +172,13 @@ pub fn create_attestation_bundle(
     let mut new_issuer_ids: Vec<String> = Vec::new(env);
 
     for attestation in attestations.iter() {
-        // Store attestation with bundle_id
+        // store_attestation handles all index writes (ChunkedIndex + ValidAttestations
+        // + issuer indexes).  Do NOT add to any subject index again here — that was
+        // the triple-write bug fixed by issue #1550.
         store_attestation(env, &attestation);
-        
-        // Add to subject's attestation index
-        Storage::add_subject_attestation(env, &attestation.subject, &attestation.id);
-        Storage::add_valid_attestation(env, &attestation.subject, &attestation.id);
-        crate::storage::ChunkedIndex::add_subject(env, &attestation.subject, &attestation.id);
 
-        // Queue for issuer index batch write
+        // Queue for issuer index batch write (store_attestation already wrote the
+        // per-attestation issuer entry; we accumulate IDs here only for the audit log).
         new_issuer_ids.push_back(attestation.id.clone());
 
         // Audit log
@@ -199,14 +197,10 @@ pub fn create_attestation_bundle(
         crate::events::Events::attestation_created(env, &attestation);
     }
 
-    // Batch write issuer index
-    Storage::add_issuer_attestations_bulk(env, &issuer, &new_issuer_ids);
-    crate::storage::ChunkedIndex::add_issuer_bulk(env, &issuer, &new_issuer_ids);
-
-    // Update stats
+    // store_attestation already wrote each issuer entry individually; we do not
+    // need bulk-add here.  Stats (issuer_stats, total_attestations) are also
+    // already incremented per-item inside store_attestation.
     let bundle_size = attestation_ids.len();
-    Storage::increment_issuer_stats(env, &issuer, bundle_size);
-    Storage::increment_total_attestations(env, bundle_size as u64);
 
     // Set issuance timestamps
     Storage::set_last_issuance_time(env, &issuer, timestamp);

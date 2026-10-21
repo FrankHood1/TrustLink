@@ -2,7 +2,7 @@
 //!
 //! Single point of contact between contract logic and on-chain storage.
 
-use crate::constants::{DAY_IN_LEDGERS, DEFAULT_INSTANCE_LIFETIME};
+use crate::constants::{DAY_IN_LEDGERS, DEFAULT_INSTANCE_LIFETIME, MAX_AUDIT_LOG_ENTRIES, MAX_VERSION_HISTORY};
 use crate::types::{
     AdminCouncil, Attestation, AttestationRequest, AttestationTemplate, AttestationVersionSnapshot,
     AuditEntry, ClaimTypeConstraints, ClaimTypeInfo, CouncilProposal, DecayConfig, Delegation,
@@ -663,6 +663,18 @@ impl Storage {
         let key = StorageKey::AuditLog(attestation_id.clone());
         let ttl = get_ttl_lifetime(env);
         let mut log = Self::get_audit_log(env, attestation_id);
+        // Cap the log at MAX_AUDIT_LOG_ENTRIES to prevent unbounded growth that
+        // would eventually make the entry too large to revoke (issue #1549).
+        if log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let drop = log.len() - MAX_AUDIT_LOG_ENTRIES + 1;
+            let mut trimmed = Vec::new(env);
+            for i in drop..log.len() {
+                if let Some(e) = log.get(i) {
+                    trimmed.push_back(e);
+                }
+            }
+            log = trimmed;
+        }
         log.push_back(entry.clone());
         env.storage().persistent().set(&key, &log);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
@@ -1006,6 +1018,18 @@ impl Storage {
         let key = StorageKey::AttestationHistory(attestation_id.clone());
         let ttl = get_ttl_lifetime(env);
         let mut history = Self::get_attestation_history(env, attestation_id);
+        // Cap the history at MAX_VERSION_HISTORY to prevent unbounded growth that
+        // would eventually make the entry too large to revoke (issue #1549).
+        if history.len() >= MAX_VERSION_HISTORY {
+            let drop = history.len() - MAX_VERSION_HISTORY + 1;
+            let mut trimmed = Vec::new(env);
+            for i in drop..history.len() {
+                if let Some(s) = history.get(i) {
+                    trimmed.push_back(s);
+                }
+            }
+            history = trimmed;
+        }
         history.push_back(snapshot.clone());
         env.storage().persistent().set(&key, &history);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
@@ -1207,7 +1231,8 @@ pub fn paginate(env: &Env, list: &Vec<String>, start: u32, limit: u32) -> Vec<St
     if start >= len {
         return result;
     }
-    let end = (start + limit).min(len);
+    // Use saturating_add to prevent overflow when limit is very large (e.g. u32::MAX).
+    let end = start.saturating_add(limit).min(len);
     for i in start..end {
         if let Some(item) = list.get(i) {
             result.push_back(item);
@@ -1222,7 +1247,8 @@ pub fn paginate_addresses(env: &Env, list: &Vec<Address>, start: u32, limit: u32
     if start >= len {
         return result;
     }
-    let end = (start + limit).min(len);
+    // Use saturating_add to prevent overflow when limit is very large (e.g. u32::MAX).
+    let end = start.saturating_add(limit).min(len);
     for i in start..end {
         if let Some(item) = list.get(i) {
             result.push_back(item);
