@@ -50,6 +50,7 @@ pub fn propose_attestation(
     proposer.require_auth();
     Validation::require_issuer(env, &proposer)?;
     Validation::require_not_paused(env)?;
+    crate::attestation::validate_new_attestation_common(env, &proposer, &subject, &claim_type)?;
 
     // Premium-tier fast-path: skip multi-sig for ACCREDITED_INVESTOR claims.
     let accredited = String::from_str(env, "ACCREDITED_INVESTOR");

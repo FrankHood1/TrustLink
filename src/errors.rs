@@ -55,6 +55,8 @@ pub enum Error {
     LimitExceeded = 29,
     /// The proposal has been cancelled by the proposer.
     ProposalCancelled = 30,
+    /// Attestation is in an invalid state (revoked, deleted, or otherwise cannot be transferred).
+    InvalidStatus = 31,
     /// Dispute has already been raised for this attestation.
     AlreadyDisputed = 31,
     /// Metadata does not match required format or constraints.

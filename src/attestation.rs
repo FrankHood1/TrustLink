@@ -246,6 +246,26 @@ pub fn maybe_trigger_expiration_hook(
 // Attestation creation
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// Shared validation for all attestation creation paths
+// -----------------------------------------------------------------------
+
+pub fn validate_new_attestation_common(
+    env: &Env,
+    issuer: &Address,
+    subject: &Address,
+    claim_type: &String,
+) -> Result<(), Error> {
+    Validation::validate_claim_type(claim_type)?;
+    Validation::require_registered_claim_type(env, claim_type)?;
+    
+    if issuer == subject {
+        return Err(Error::Unauthorized);
+    }
+    
+    Ok(())
+}
+
 pub fn create_attestation_internal(
     env: &Env,
     issuer: Address,
@@ -260,8 +280,7 @@ pub fn create_attestation_internal(
     issuer.require_auth();
     Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
-    Validation::validate_claim_type(&claim_type)?;
-    Validation::require_registered_claim_type(env, &claim_type)?;
+    validate_new_attestation_common(env, &issuer, &subject, &claim_type)?;
     Validation::validate_metadata(env, &metadata)?;
     Validation::validate_claim_constraints(env, &claim_type, &metadata)?;
     Validation::validate_metadata_hash_only(env, &metadata)?;
@@ -269,10 +288,6 @@ pub fn create_attestation_internal(
     validate_tags(&tags)?;
     validate_native_expiration(env, expiration)?;
     validate_valid_from(env, valid_from)?;
-
-    if issuer == subject {
-        return Err(Error::Unauthorized);
-    }
 
     if Storage::is_whitelist_mode(env, &issuer) && !Storage::is_whitelisted(env, &issuer, &subject) {
         return Err(Error::SubjectNotWhitelisted);
@@ -424,6 +439,7 @@ pub fn import_attestation(
     Validation::require_admin(env, &admin)?;
     Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
+    validate_new_attestation_common(env, &issuer, &subject, &claim_type)?;
     validate_import_timestamps(env, timestamp, expiration)?;
 
     let limits = Storage::get_limits(env);
@@ -499,6 +515,7 @@ pub fn bridge_attestation(
     bridge.require_auth();
     Validation::require_bridge(env, &bridge)?;
     Validation::require_not_paused(env)?;
+    validate_new_attestation_common(env, &bridge, &subject, &claim_type)?;
     validate_source_reference(&source_chain, &source_tx)?;
 
     // Check limits before creating attestation
@@ -878,20 +895,33 @@ pub fn transfer_attestation(
 ) -> Result<(), Error> {
     admin.require_auth();
     Validation::require_admin(env, &admin)?;
+    Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &new_issuer)?;
 
     let mut attestation = Storage::get_attestation(env, &attestation_id)?;
     let old_issuer = attestation.issuer.clone();
 
+    // Reject revoked or deleted attestations
+    if attestation.revoked || attestation.deleted {
+        return Err(Error::InvalidStatus);
+    }
+
+    // Reject self-attestation (new_issuer == subject)
+    if new_issuer == attestation.subject {
+        return Err(Error::Unauthorized);
+    }
+
     if old_issuer == new_issuer {
         return Ok(());
     }
 
+    // Clean both the legacy flat index and the new chunked index
     Storage::remove_issuer_attestation(env, &old_issuer, &attestation_id);
     Storage::add_issuer_attestation(env, &new_issuer, &attestation_id);
     crate::storage::ChunkedIndex::remove_issuer(env, &old_issuer, &attestation_id);
     crate::storage::ChunkedIndex::add_issuer(env, &new_issuer, &attestation_id);
 
+    // Move issuer stats
     let mut old_stats = Storage::get_issuer_stats(env, &old_issuer);
     old_stats.total_issued = old_stats.total_issued.saturating_sub(1);
     Storage::set_issuer_stats(env, &old_issuer, &old_stats);
@@ -900,6 +930,7 @@ pub fn transfer_attestation(
     new_stats.total_issued = new_stats.total_issued.saturating_add(1);
     Storage::set_issuer_stats(env, &new_issuer, &new_stats);
 
+    // Update attestation with new issuer
     attestation.issuer = new_issuer.clone();
     Storage::set_attestation(env, &attestation);
 
@@ -1235,4 +1266,133 @@ pub fn simulate_create_attestation(
     };
 
     Ok((attestation_id, fee_amount))
+}
+
+// -----------------------------------------------------------------------
+// Bundle operations
+// -----------------------------------------------------------------------
+
+/// Create a bundle of attestations for multiple subjects with the same claim type.
+/// Each attestation is added to the bundle independently via store_attestation.
+/// No redundant indexing or stats updates occur.
+pub fn create_attestation_bundle(
+    env: &Env,
+    issuer: Address,
+    subjects: Vec<Address>,
+    claim_type: String,
+    expiration: Option<u64>,
+) -> Result<String, Error> {
+    issuer.require_auth();
+    Validation::require_issuer(env, &issuer)?;
+    Validation::require_not_paused(env)?;
+    validate_new_attestation_common(env, &issuer, &subjects.get(0).ok_or(Error::LimitExceeded)?, &claim_type)?;
+    validate_native_expiration(env, expiration)?;
+    check_rate_limit(env, &issuer, &claim_type)?;
+
+    let timestamp = env.ledger().timestamp();
+    let limits = Storage::get_limits(env);
+    let issuer_count = Storage::get_issuer_attestations(env, &issuer).len();
+    if issuer_count.saturating_add(subjects.len()) > limits.max_attestations_per_issuer {
+        return Err(Error::LimitExceeded);
+    }
+
+    let mut attestation_ids: Vec<String> = Vec::new(env);
+
+    for subject in subjects.iter() {
+        if issuer == subject {
+            return Err(Error::Unauthorized);
+        }
+
+        let attestation_id = Attestation::generate_id(env, &issuer, &subject, &claim_type, timestamp);
+        if Storage::has_attestation(env, &attestation_id) {
+            return Err(Error::DuplicateAttestation);
+        }
+
+        let subject_count = Storage::get_subject_attestations(env, &subject).len();
+        if subject_count >= limits.max_attestations_per_subject {
+            return Err(Error::LimitExceeded);
+        }
+
+        let attestation = Attestation {
+            id: attestation_id.clone(),
+            issuer: issuer.clone(),
+            subject: subject.clone(),
+            claim_type: claim_type.clone(),
+            timestamp,
+            expiration,
+            revoked: false,
+            deleted: false,
+            metadata: None,
+            jurisdiction: None,
+            valid_from: None,
+            origin: AttestationOrigin::Native,
+            source_chain: None,
+            source_tx: None,
+            tags: None,
+            revocation_reason: None,
+        };
+
+        // Rely on store_attestation only - no redundant indexing or stats updates
+        store_attestation(env, &attestation);
+        Storage::append_audit_entry(
+            env,
+            &attestation_id,
+            &AuditEntry {
+                action: AuditAction::Created,
+                actor: issuer.clone(),
+                timestamp,
+                details: None,
+            },
+        );
+        Events::attestation_created(env, &attestation);
+        attestation_ids.push_back(attestation_id);
+    }
+
+    let bundle_id = crate::types::AttestationBundle::generate_id(env, &issuer, &claim_type, timestamp);
+    let bundle = crate::types::AttestationBundle {
+        id: bundle_id.clone(),
+        issuer: issuer.clone(),
+        claim_type,
+        attestation_ids,
+        created_at: timestamp,
+        all_valid: true,
+    };
+
+    Storage::set_bundle(env, &bundle);
+    Storage::set_last_issuance_time(env, &issuer, timestamp);
+    if Storage::get_claim_type_rate_limit(env, &bundle.claim_type).is_some() {
+        Storage::set_last_issuance_time_by_claim_type(env, &issuer, &bundle.claim_type, timestamp);
+    }
+
+    charge_attestation_fee(env, &issuer)?;
+
+    Events::bundle_created(env, &bundle_id, &issuer, bundle.attestation_ids.len());
+    Ok(bundle_id)
+}
+
+/// Query the validity of a bundle: checks expiration of each member and returns
+/// whether all members are currently valid (not revoked, not deleted, not expired).
+/// This is a pure getter function with no side effects.
+pub fn is_bundle_valid(env: &Env, bundle_id: String) -> Result<bool, Error> {
+    let bundle = Storage::get_bundle(env, &bundle_id)?;
+    let current_time = env.ledger().timestamp();
+
+    for attestation_id in bundle.attestation_ids.iter() {
+        match Storage::get_attestation(env, &attestation_id) {
+            Ok(attestation) => {
+                // Check status properly: revoked, deleted, expired, or not-yet-valid members make bundle invalid
+                let status = attestation.get_status(current_time);
+                match status {
+                    crate::types::AttestationStatus::Valid => {},
+                    _ => return Ok(false),
+                }
+            }
+            Err(_) => {
+                // Missing attestations make bundle invalid
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(true)
 }

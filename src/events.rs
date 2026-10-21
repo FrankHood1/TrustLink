@@ -551,3 +551,11 @@ impl Events {
         );
     }
 }
+
+    pub fn bundle_created(env: &Env, bundle_id: &String, issuer: &Address, count: usize) {
+        const TOPIC_BUNDLE: Symbol = symbol_short!("bundled");
+        env.events().publish(
+            (TOPIC_BUNDLE, issuer.clone()),
+            (bundle_id.clone(), count),
+        );
+    }

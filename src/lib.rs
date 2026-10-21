@@ -44,6 +44,17 @@ use events::Events;
 use crate::types::{
     AdminCouncil, AttestationBundle, AttestationRequest, AttestationStatus,
 use crate::types::{
+    Attestation, AttestationBundle, AttestationRequest, AttestationStatus, AuditAction, AuditEntry, ClaimTypeInfo,
+    ContractConfig, ContractMetadata, Endorsement, Error, FeeConfig, GlobalStats, HealthStatus,
+    IssuerMetadata, IssuerStats, IssuerTier, MultiSigProposal, PendingAdminTransfer, RateLimitConfig, RequestStatus,
+    RevocationList, RevocationListFormat, StorageLimits, TtlConfig, ATTESTATION_REQUEST_TTL_SECS, MULTISIG_PROPOSAL_TTL_SECS,
+    AdminCouncil, Attestation, AttestationRequest, AttestationStatus, AttestationTemplate,
+    AttestationVersionSnapshot, AuditAction, AuditEntry, ClaimTypeInfo, CouncilOperation, CouncilProposal,
+    ContractConfig, ContractMetadata, DecayConfig, Delegation, DisputeRecord, Endorsement, Error,
+    ExpirationHook, FeeConfig, GlobalStats, HealthStatus, IssuerMetadata, IssuerStats, IssuerTier,
+    MultiSigProposal, PendingAdminTransfer, RateLimitConfig, RequestStatus, RevocationList,
+    RevocationListFormat, StorageLimits,
+    TtlConfig, ATTESTATION_REQUEST_TTL_SECS, MULTISIG_PROPOSAL_TTL_SECS, SECS_PER_DAY,
     AdminCouncil, Attestation, AttestationBundle, AttestationRequest, AttestationStatus,
     AttestationTemplate, AttestationVersionSnapshot, AuditEntry, ClaimTypeConstraints,
     ContractConfig, ContractMetadata, CouncilOperation, CouncilProposal,
@@ -629,6 +640,25 @@ impl TrustLinkContract {
 
     pub fn revoke_attestations_batch(env: Env, issuer: Address, attestation_ids: Vec<String>, reason: Option<String>) -> Result<u32, Error> {
         attestation::revoke_attestations_batch(&env, issuer, attestation_ids, reason)
+    }
+
+    // -----------------------------------------------------------------------
+    // Bundles
+    // -----------------------------------------------------------------------
+
+    pub fn create_attestation_bundle(
+        env: Env,
+        issuer: Address,
+        subjects: Vec<Address>,
+        claim_type: String,
+        expiration: Option<u64>,
+    ) -> Result<String, Error> {
+        attestation::create_attestation_bundle(&env, issuer, subjects, claim_type, expiration)
+    }
+
+    #[must_use]
+    pub fn is_bundle_valid(env: Env, bundle_id: String) -> Result<bool, Error> {
+        attestation::is_bundle_valid(&env, bundle_id)
     }
 
     // -----------------------------------------------------------------------

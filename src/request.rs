@@ -81,6 +81,7 @@ pub fn fulfill_request(
         return Err(Error::RequestExpired);
     }
 
+    crate::attestation::validate_new_attestation_common(env, &issuer, &request.subject, &request.claim_type)?;
     validate_native_expiration(env, expiration)?;
 
     let attestation_id = Attestation::generate_id(env, &issuer, &request.subject, &request.claim_type, current_time);
