@@ -586,6 +586,13 @@ One chunk of the subject's attestation ID list. Chunk size is configurable via
 contiguous; the first missing chunk signals end of list. Old trailing chunks
 are deleted when the list shrinks.
 
+**Pagination guarantee:** `get_subject_attestations(subject, start, limit)` and
+`get_issuer_attestations(issuer, start, limit)` return a full page of `limit`
+non-deleted IDs unless the end of the index has been reached. Deleted IDs (and
+any IDs whose record cannot be loaded) are skipped and do not shrink the page,
+so SDK iterators such as `iterateSubjectAttestations` that stop on a short page
+will not miss data.
+
 **Rust type:**
 ```rust
 Vec<String>
@@ -627,6 +634,10 @@ Vec<String>
 
 One chunk of the issuer's attestation ID list. Same chunking behaviour as
 `SubjectAttestationChunk`.
+
+**Pagination guarantee:** `get_issuer_attestations(issuer, start, limit)` returns
+a full page of `limit` non-deleted IDs unless the end of the index has been
+reached. Deleted IDs are skipped and do not shrink the page.
 
 **Rust type:**
 ```rust
@@ -1428,6 +1439,31 @@ it refreshes.
 | `set_dispute` | `set_dispute` | `Dispute(attestation_id)` |
 | `set_last_issuance_time` | `set_last_issuance_time` | `LastIssuanceTime(issuer)` |
 | `set_last_issuance_time_by_claim_type` | `set_last_issuance_time_by_claim_type` | `ClaimTypeIssuanceKey{issuer, claim_type}` |
+
+### Maximum TTL clamp and keeper re-extension
+
+Persistent TTL extensions are silently clamped by the host to the network's
+`max_entry_ttl` (roughly 6 months on mainnet). A single call to
+`extend_attestation_ttl_for_expiry` can therefore never keep a long-lived
+attestation (e.g. a one-year KYC) live for its full expiration window — the
+extension is clamped to `max_entry_ttl`, and the entry is re-archived once that
+window elapses unless it is extended again.
+
+To cover long expirations, the contract provides `bump_attestation_ttl(id)`,
+a **permissionless** entry point that re-extends the attestation record and all
+of its related keys (`ValidAttestations(subject)`, the subject and issuer
+chunk indexes, `AuditLog(id)`, `AttestationHistory(id)`) out to the attestation's
+expiration (clamped to `max_entry_ttl` per call). A keeper job should call
+`bump_attestation_ttl` for every long-lived attestation on a periodic schedule
+(at least once per configured `ttl_days`, and well before expiration). See
+`examples/issuer-cli` for the `bump-ttl` command and a documented keeper
+procedure.
+
+Attestations are created and renewed with their expiry-aware TTL already
+applied (`create_*`, `renew_attestation`, `update_expiration`, bundles,
+batches, imports and multisig all call `extend_attestation_ttl_for_expiry`),
+so fresh entries start covered; the keeper is only needed for periodic
+re-extension beyond the host's clamp.
 
 ### Implications for archival node operators
 

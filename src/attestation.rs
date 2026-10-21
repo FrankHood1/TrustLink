@@ -363,6 +363,9 @@ pub fn create_attestation_internal(
     charge_attestation_fee(env, &issuer)?;
 
     Events::attestation_created(env, &attestation);
+    // Keep the attestation and its indexes live until expiration so long-lived
+    // attestations are not archived by the default TTL.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Ok(attestation_id)
 }
 
@@ -501,6 +504,8 @@ pub fn import_attestation(
             details: None,
         },
     );
+    // Keep the attestation and its indexes live until expiration.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Ok(attestation_id)
 }
 
@@ -577,6 +582,8 @@ pub fn bridge_attestation(
         timestamp,
         details: None,
     });
+    // Keep the attestation and its indexes live until expiration.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Ok(attestation_id)
 }
 
@@ -668,6 +675,8 @@ pub fn create_attestations_batch(
                 details: None,
             },
         );
+        // Keep this attestation and its subject-side indexes live until expiration.
+        Storage::extend_attestation_ttl_for_expiry(env, &attestation);
         Events::attestation_created(env, &attestation);
 
         new_issuer_ids.push_back(attestation_id.clone());
@@ -679,6 +688,14 @@ pub fn create_attestations_batch(
     // Single write: issuer index (replaces N add_issuer_attestation calls).
     Storage::add_issuer_attestations_bulk(env, &issuer, &new_issuer_ids);
     crate::storage::ChunkedIndex::add_issuer_bulk(env, &issuer, &new_issuer_ids);
+
+    // The issuer chunks above were written after the per-attestation extensions,
+    // so extend them now to cover the full expiration window.
+    if let Some(first) = ids.first() {
+        if let Ok(att) = Storage::get_attestation(env, first) {
+            Storage::extend_attestation_ttl_for_expiry(env, &att);
+        }
+    }
 
     // Single write: issuer stats (replaces N set_issuer_stats calls).
     Storage::increment_issuer_stats(env, &issuer, batch_len);
@@ -771,6 +788,8 @@ pub fn renew_attestation(
         timestamp: env.ledger().timestamp(),
         details,
     });
+    // Keep the attestation and its indexes live until the new expiration.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Ok(())
 }
 
@@ -876,7 +895,7 @@ pub fn update_expiration(
 
     attestation.expiration = new_expiration;
     Storage::set_attestation(env, &attestation);
-    Storage::extend_attestation_ttl_for_expiry(env, &attestation_id, new_expiration);
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Events::attestation_renewed(env, &attestation_id, &issuer, new_expiration);
     Storage::append_audit_entry(env, &attestation_id, &AuditEntry {
         action: AuditAction::Updated,
@@ -940,7 +959,9 @@ pub fn transfer_attestation(
         timestamp: env.ledger().timestamp(),
         details: Some(new_issuer.to_string()),
     });
-
+    // `set_attestation` above reset the record's TTL to the default window;
+    // re-apply the expiry-aware extension so the moved attestation stays live.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Events::attestation_transferred(env, &attestation_id, &old_issuer, &new_issuer);
     Ok(())
 }
@@ -958,6 +979,9 @@ pub fn request_deletion(env: &Env, subject: Address, attestation_id: String) -> 
     Storage::remove_subject_attestation(env, &subject, &attestation_id);
     Storage::remove_valid_attestation(env, &subject, &attestation_id);
     crate::storage::ChunkedIndex::remove_subject(env, &subject, &attestation_id);
+    // Also remove from the issuer index so the issuer index never retains
+    // deleted IDs (the subject index already drops them on deletion).
+    crate::storage::ChunkedIndex::remove_issuer(env, &attestation.issuer, &attestation_id);
 
     let timestamp = env.ledger().timestamp();
     Events::deletion_requested(env, &subject, &attestation_id, timestamp);
@@ -1017,6 +1041,10 @@ pub fn amend_attestation(
         timestamp,
         details: new_metadata,
     });
+    // `set_attestation`/`push_attestation_version` above reset TTLs to the
+    // default window; re-apply the expiry-aware extension so an amended
+    // long-lived attestation stays live.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Events::attestation_amended(env, &attestation_id, &issuer, timestamp);
     Ok(())
 }
@@ -1173,6 +1201,8 @@ pub fn create_attestation_as_delegate(
             details: None,
         },
     );
+    // Keep the attestation and its indexes live until expiration.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Events::attestation_created(env, &attestation);
     Ok(attestation_id)
 }

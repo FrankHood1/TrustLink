@@ -160,18 +160,38 @@ pub fn get_attestation_status(env: &Env, attestation_id: String) -> Result<Attes
     Ok(status)
 }
 
-pub fn get_subject_attestations(env: &Env, subject: Address, start: u32, limit: u32) -> Vec<String> {
-    // Use the chunked index: loads only the chunks that overlap [start, start+limit).
-    let ids = crate::storage::ChunkedIndex::get_subject_page(env, &subject, start, limit);
-    let mut result = Vec::new(env);
-    for id in ids.iter() {
+/// Fetch up to `limit` non-deleted attestation IDs for `subject`, returning the
+/// slice `filtered[start..start+limit]` of the non-deleted index.
+///
+/// **Page-full guarantee:** the returned page contains exactly `limit` items
+/// unless the end of the (non-deleted) index has been reached. Deleted IDs (and
+/// any IDs whose record can't be loaded) are excluded from the index entirely,
+/// so they neither shrink the page nor cause duplicates across pages. This makes
+/// the function safe for cursor pagination where `start` advances by the number
+/// of items returned (as the SDK's [`iterateSubjectAttestations`] does).
+///
+/// `start` is an offset into the *filtered* result set (deleted IDs excluded),
+/// not into the underlying chunked index.
+fn subject_page_filtered(env: &Env, subject: &Address, start: u32, limit: u32) -> Vec<String> {
+    let all_ids = crate::storage::ChunkedIndex::get_subject_all(env, subject);
+    let mut filtered = Vec::new(env);
+    // Only need to collect up to `start + limit` live IDs to satisfy the page.
+    let needed = start.saturating_add(limit);
+    for id in all_ids.iter() {
+        if filtered.len() >= needed as usize {
+            break;
+        }
         if let Ok(a) = Storage::get_attestation(env, &id) {
             if !a.deleted {
-                result.push_back(id);
+                filtered.push_back(id);
             }
         }
     }
-    result
+    crate::storage::paginate(env, &filtered, start, limit)
+}
+
+pub fn get_subject_attestations(env: &Env, subject: Address, start: u32, limit: u32) -> Vec<String> {
+    subject_page_filtered(env, &subject, start, limit)
 }
 
 /// Search the subject's attestations between `from_ts` and `to_ts`, excluding deleted records.
@@ -330,18 +350,35 @@ pub fn get_attestations_by_jurisdiction(
     crate::storage::paginate(env, &filtered, start, limit)
 }
 
-pub fn get_issuer_attestations(env: &Env, issuer: Address, start: u32, limit: u32) -> Vec<String> {
-    // Use the chunked index: loads only the chunks that overlap [start, start+limit).
-    let ids = crate::storage::ChunkedIndex::get_issuer_page(env, &issuer, start, limit);
-    let mut result = Vec::new(env);
-    for id in ids.iter() {
+/// Fetch up to `limit` non-deleted attestation IDs for `issuer`, returning the
+/// slice `filtered[start..start+limit]` of the non-deleted index.
+///
+/// **Page-full guarantee:** the returned page contains exactly `limit` items
+/// unless the end of the (non-deleted) index has been reached. Deleted IDs are
+/// excluded from the index entirely, so they neither shrink the page nor cause
+/// duplicates across pages.
+///
+/// `start` is an offset into the *filtered* result set (deleted IDs excluded),
+/// not into the underlying chunked index.
+fn issuer_page_filtered(env: &Env, issuer: &Address, start: u32, limit: u32) -> Vec<String> {
+    let all_ids = crate::storage::ChunkedIndex::get_issuer_all(env, issuer);
+    let mut filtered = Vec::new(env);
+    let needed = start.saturating_add(limit);
+    for id in all_ids.iter() {
+        if filtered.len() >= needed as usize {
+            break;
+        }
         if let Ok(a) = Storage::get_attestation(env, &id) {
             if !a.deleted {
-                result.push_back(id);
+                filtered.push_back(id);
             }
         }
     }
-    result
+    crate::storage::paginate(env, &filtered, start, limit)
+}
+
+pub fn get_issuer_attestations(env: &Env, issuer: Address, start: u32, limit: u32) -> Vec<String> {
+    issuer_page_filtered(env, &issuer, start, limit)
 }
 
 pub fn get_issuer_attestation_count(env: &Env, issuer: Address) -> u32 {

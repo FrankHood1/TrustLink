@@ -588,6 +588,15 @@ impl TrustLinkContract {
         attestation::update_expiration(&env, issuer, attestation_id, new_expiration)
     }
 
+    /// Permissionless bump of an attestation's TTL (and all of its related
+    /// keys) so it stays live until its expiration. Intended to be called by a
+    /// keeper job on a periodic schedule, since the host silently clamps
+    /// persistent extensions beyond `max_entry_ttl` (roughly 6 months on
+    /// mainnet). No authorization is required.
+    pub fn bump_attestation_ttl(env: Env, attestation_id: String) -> Result<(), Error> {
+        Storage::bump_attestation_ttl(&env, &attestation_id)
+    }
+
     pub fn transfer_attestation(env: Env, admin: Address, attestation_id: String, new_issuer: Address) -> Result<(), Error> {
         attestation::transfer_attestation(&env, admin, attestation_id, new_issuer)
     }

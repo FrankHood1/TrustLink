@@ -1189,22 +1189,89 @@ impl Storage {
 
     // ── Expiry-aware TTL extension ────────────────────────────────────────────
 
-    /// Extends the attestation's persistent TTL to cover the full duration until
-    /// `expiry`, if that is longer than the configured default TTL.
-    pub fn extend_attestation_ttl_for_expiry(env: &Env, attestation_id: &String, expiry: Option<u64>) {
+    /// Extend the attestation record and all of its related keys so they remain
+    /// live until `attestation.expiration` (or the default TTL window when there
+    /// is no expiration). Called on every creation and renewal path.
+    ///
+    /// Extends: `Attestation(id)`, `ValidAttestations(subject)`, the subject and
+    /// issuer `*AttestationChunk` entries, `AuditLog(id)` and
+    /// `AttestationHistory(id)`. Only keys that already exist are extended;
+    /// keys that have not been written yet (e.g. a history or audit log that is
+    /// appended later) are skipped and must be extended after they are written.
+    ///
+    /// Note: persistent extensions beyond the network's `max_entry_ttl` are
+    /// silently clamped by the host, so a long-lived attestation needs periodic
+    /// re-extension (see [`Self::bump_attestation_ttl`]) to stay live
+    /// for its full expiration window.
+    pub fn extend_attestation_ttl_for_expiry(env: &Env, attestation: &Attestation) {
         let default_ttl = get_ttl_lifetime(env);
-        let target_ttl = if let Some(ts) = expiry {
-            let current = env.ledger().timestamp();
-            let secs = ts.saturating_sub(current);
-            let days = secs / crate::constants::SECS_PER_DAY;
-            let expiry_ledgers = (days as u32).saturating_mul(crate::constants::DAY_IN_LEDGERS);
-            expiry_ledgers.max(default_ttl)
-        } else {
-            default_ttl
+        let target_ttl = match attestation.expiration {
+            Some(ts) => {
+                let current = env.ledger().timestamp();
+                let secs = ts.saturating_sub(current);
+                let days = secs / crate::constants::SECS_PER_DAY;
+                (days as u32)
+                    .saturating_mul(crate::constants::DAY_IN_LEDGERS)
+                    .max(default_ttl)
+            }
+            None => default_ttl,
         };
-        if target_ttl > default_ttl {
-            let key = StorageKey::Attestation(attestation_id.clone());
+        if target_ttl <= default_ttl {
+            return;
+        }
+
+        let id = &attestation.id;
+        let subject = &attestation.subject;
+        let issuer = &attestation.issuer;
+
+        extend_persistent_key(env, &StorageKey::Attestation(id.clone()), target_ttl);
+        extend_persistent_key(
+            env,
+            &StorageKey::ValidAttestations(subject.clone()),
+            target_ttl,
+        );
+        extend_persistent_key(env, &StorageKey::AuditLog(id.clone()), target_ttl);
+        extend_persistent_key(
+            env,
+            &StorageKey::AttestationHistory(id.clone()),
+            target_ttl,
+        );
+        extend_chunks_for(env, subject, true, target_ttl);
+        extend_chunks_for(env, issuer, false, target_ttl);
+    }
+
+    /// Permissionless bump of an attestation's TTL (and all its related keys)
+    /// so it stays live until its expiration. Intended to be called by a keeper
+    /// job on a periodic schedule, since the host silently clamps persistent
+    /// extensions beyond `max_entry_ttl` (roughly 6 months on mainnet).
+    pub fn bump_attestation_ttl(env: &Env, attestation_id: &String) -> Result<(), Error> {
+        let attestation = Self::get_attestation(env, attestation_id)?;
+        Self::extend_attestation_ttl_for_expiry(env, &attestation);
+        Ok(())
+    }
+
+    /// Extend a single persistent key if it is present in storage.
+    fn extend_persistent_key(env: &Env, key: &StorageKey, target_ttl: u32) {
+        if env.storage().persistent().has(key) {
+            env.storage().persistent().extend_ttl(key, target_ttl, target_ttl);
+        }
+    }
+
+    /// Extend every existing chunk for `owner` (`true` = subject, `false` =
+    /// issuer).
+    fn extend_chunks_for(env: &Env, owner: &Address, is_subject: bool, target_ttl: u32) {
+        let mut chunk_index = 0u32;
+        loop {
+            let key = if is_subject {
+                StorageKey::SubjectAttestationChunk(owner.clone(), chunk_index)
+            } else {
+                StorageKey::IssuerAttestationChunk(owner.clone(), chunk_index)
+            };
+            if !env.storage().persistent().has(&key) {
+                break;
+            }
             env.storage().persistent().extend_ttl(&key, target_ttl, target_ttl);
+            chunk_index += 1;
         }
     }
 

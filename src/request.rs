@@ -118,6 +118,8 @@ pub fn fulfill_request(
     };
 
     store_attestation(env, &attestation);
+    // Keep the attestation and its indexes live until expiration.
+    Storage::extend_attestation_ttl_for_expiry(env, &attestation);
     Events::attestation_created(env, &attestation);
 
     request.status = RequestStatus::Fulfilled;
