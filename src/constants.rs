@@ -17,3 +17,11 @@ pub const MIN_TTL_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS;
 
 /// Maximum days for expiring attestations query window (issue #945).
 pub const MAX_EXPIRING_WINDOW_DAYS: u32 = 365;
+
+/// Maximum number of audit log entries retained per attestation (issue #1549).
+/// When the cap is reached the oldest entry is dropped to make room for the new one.
+pub const MAX_AUDIT_LOG_ENTRIES: u32 = 100;
+
+/// Maximum number of version snapshots retained per attestation (issue #1549).
+/// When the cap is reached the oldest snapshot is dropped to make room for the new one.
+pub const MAX_VERSION_HISTORY: u32 = 50;

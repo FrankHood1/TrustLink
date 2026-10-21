@@ -189,7 +189,7 @@ pub fn get_attestations_in_range(
     start: u32,
     limit: u32,
 ) -> Vec<Attestation> {
-    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let attestation_ids = crate::storage::ChunkedIndex::get_subject_all(env, &subject);
     let mut filtered_ids = Vec::new(env);
     for id in attestation_ids.iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &id) {
@@ -230,7 +230,7 @@ pub fn get_attestations_in_range_after(
         return Vec::new(env);
     }
 
-    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let attestation_ids = crate::storage::ChunkedIndex::get_subject_all(env, &subject);
     let mut filtered = Vec::new(env);
     for id in attestation_ids.iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &id) {
@@ -279,7 +279,8 @@ pub fn get_attestations_in_range_after(
     }
 
     let mut result = Vec::new(env);
-    let end = (start_index + limit).min(filtered.len());
+    // Use saturating_add to prevent overflow when limit is very large (e.g. u32::MAX).
+    let end = start_index.saturating_add(limit).min(filtered.len());
     for i in start_index..end {
         if let Some(attestation) = filtered.get(i) {
             result.push_back(attestation.clone());
@@ -289,7 +290,7 @@ pub fn get_attestations_in_range_after(
 }
 
 pub fn get_attestations_by_tag(env: &Env, subject: Address, tag: String) -> Vec<String> {
-    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let attestation_ids = crate::storage::ChunkedIndex::get_subject_all(env, &subject);
     let mut result = Vec::new(env);
     for id in attestation_ids.iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &id) {
@@ -314,7 +315,7 @@ pub fn get_attestations_by_jurisdiction(
     start: u32,
     limit: u32,
 ) -> Vec<String> {
-    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let attestation_ids = crate::storage::ChunkedIndex::get_subject_all(env, &subject);
     let mut filtered = Vec::new(env);
     for id in attestation_ids.iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &id) {
@@ -350,7 +351,7 @@ pub fn get_issuer_attestation_count(env: &Env, issuer: Address) -> u32 {
 pub fn get_valid_claims(env: &Env, subject: Address) -> Vec<String> {
     let current_time = env.ledger().timestamp();
     let mut result = Vec::new(env);
-    for attestation_id in Storage::get_subject_attestations(env, &subject).iter() {
+    for attestation_id in crate::storage::ChunkedIndex::get_subject_all(env, &subject).iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &attestation_id) {
             if !attestation.deleted && attestation.get_status(current_time) == AttestationStatus::Valid {
                 let mut already_present = false;
@@ -370,7 +371,7 @@ pub fn get_valid_claims(env: &Env, subject: Address) -> Vec<String> {
 }
 
 pub fn get_attestation_by_type(env: &Env, subject: Address, claim_type: String) -> Option<Attestation> {
-    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let attestation_ids = crate::storage::ChunkedIndex::get_subject_all(env, &subject);
     let current_time = env.ledger().timestamp();
     let mut index = attestation_ids.len();
     while index > 0 {
@@ -396,7 +397,7 @@ pub fn get_subject_attestation_count(env: &Env, subject: Address) -> u32 {
 pub fn get_valid_claim_count(env: &Env, subject: Address) -> u32 {
     let current_time = env.ledger().timestamp();
     let mut count = 0u32;
-    for attestation_id in Storage::get_subject_attestations(env, &subject).iter() {
+    for attestation_id in crate::storage::ChunkedIndex::get_subject_all(env, &subject).iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &attestation_id) {
             if !attestation.deleted && attestation.get_status(current_time) == AttestationStatus::Valid {
                 count += 1;
@@ -446,7 +447,7 @@ pub fn get_expiring_attestations(
     let current_time = env.ledger().timestamp();
     let window_end = current_time + (within_days as u64) * SECS_PER_DAY;
 
-    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let attestation_ids = crate::storage::ChunkedIndex::get_subject_all(env, &subject);
     let mut filtered = Vec::new(env);
 
     for id in attestation_ids.iter() {
