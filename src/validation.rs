@@ -267,7 +267,7 @@ impl Validation {
         Ok(())
     }
 
-    /// Validate that an attestation satisfies claim type constraints.
+    /// Validate claim type constraints on metadata.
     ///
     /// # Errors
     /// - [`Error::ConstraintViolation`] — metadata does not satisfy constraints.
@@ -292,6 +292,38 @@ impl Validation {
                         return Err(Error::ConstraintViolation);
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Issue #1579: Validate a `template_id` string.
+    ///
+    /// # Rules
+    /// - Minimum 1 character, maximum 256 characters.
+    /// - Only ASCII alphanumeric characters (`A-Z`, `a-z`, `0-9`) and underscores (`_`) are allowed.
+    ///
+    /// # Errors
+    /// - [`Error::InvalidTemplateId`] — length outside range or contains disallowed characters.
+    pub fn validate_template_id(template_id: &String) -> Result<(), Error> {
+        use crate::constants::{MIN_TEMPLATE_ID_LEN, MAX_TEMPLATE_ID_LEN};
+        
+        let len = template_id.len() as u32;
+        if len < MIN_TEMPLATE_ID_LEN || len > MAX_TEMPLATE_ID_LEN {
+            return Err(Error::InvalidTemplateId);
+        }
+        
+        // Check for valid characters (alphanumeric + underscore)
+        let mut buf = [0u8; 256];
+        let byte_len = len as usize;
+        template_id.copy_into_slice(&mut buf[..byte_len]);
+        
+        for &b in buf[..byte_len].iter() {
+            let is_alpha = b.is_ascii_alphabetic();
+            let is_digit = b.is_ascii_digit();
+            let is_underscore = b == b'_';
+            if !is_alpha && !is_digit && !is_underscore {
+                return Err(Error::InvalidTemplateId);
             }
         }
         Ok(())

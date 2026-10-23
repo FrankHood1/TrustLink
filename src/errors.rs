@@ -94,12 +94,10 @@ pub enum Error {
     VersionMismatch = 47,
     /// Feature not yet implemented.
     NotImplemented = 48,
-    /// Attestation is not valid (expired, pending, or deleted).
-    AttestationNotValid = 49,
-    /// Invalid configuration value (e.g., min > max for constraints).
-    InvalidConfigValue = 49,
-    /// Description exceeds maximum length of 256 bytes.
-    DescriptionTooLong = 50,
-    /// Claim type is deprecated and cannot be used for new attestations.
-    ClaimTypeDeprecated = 51,
+    /// Issue #1579: Template ID is empty, too long, or contains disallowed characters.
+    InvalidTemplateId = 49,
+    /// Issue #1566: A resource with this identifier already exists (e.g., template already exists).
+    ConflictError = 50,
+    /// Issue #1567: Attestation cannot be disputed (revoked, expired, etc.).
+    InvalidAttestation = 51,
 }

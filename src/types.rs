@@ -331,6 +331,10 @@ pub enum AuditAction {
     Transferred,
     Deleted,
     Amended,
+    /// Dispute raised against an attestation
+    Disputed,
+    /// Dispute resolved with an outcome
+    DisputeResolved,
 }
 
 /// A single immutable entry in an attestation's audit log.
@@ -429,8 +433,21 @@ impl Default for DecayConfig {
     }
 }
 
-/// An active dispute raised by a subject against one of their attestations.
-/// The record is removed when the dispute is resolved.
+/// Status of a dispute record.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DisputeStatus {
+    /// Dispute is currently open and unresolved
+    Open = 0,
+    /// Dispute was upheld (subject's claim was valid)
+    Upheld = 1,
+    /// Dispute was rejected (issuer's attestation was valid)
+    Rejected = 2,
+}
+
+/// A dispute record raised by a subject against one of their attestations.
+/// Records remain after resolution to maintain an audit trail.
+/// Issue #1566: Enhanced to record resolution outcomes.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisputeRecord {
@@ -438,6 +455,14 @@ pub struct DisputeRecord {
     pub subject: Address,
     pub reason: String,
     pub disputed_at: u64,
+    /// Current status of this dispute
+    pub status: DisputeStatus,
+    /// Address of the issuer or admin who resolved this dispute (None if Open)
+    pub resolved_by: Option<Address>,
+    /// Timestamp when the dispute was resolved (None if Open)
+    pub resolved_at: Option<u64>,
+    /// Optional resolution note explaining the decision
+    pub resolution_note: Option<String>,
 }
 
 /// A named attestation template owned by an issuer.
